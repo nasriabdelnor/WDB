@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Pipe contour in background -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#64748B"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M30,76 L78,76" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#94A3B8"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:pathData="M30,82 L78,82" />
+
+    <!-- Weld Joint Root Bead at center (orange glow) -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M51,73 L57,73 L55,79 L49,79 Z" />
+
+    <!-- Welder Helmet Outer Shell -->
+    <path
+        android:fillColor="#1E293B"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round"
+        android:pathData="M36,44 C36,33 44,27 54,27 C64,27 72,33 72,44 C72,55 70,64 66,70 C64,72 61,73 54,73 C47,73 44,72 42,70 C38,64 36,55 36,44 Z" />
+
+    <!-- Welder Helmet Side Protection Lines -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0284C7"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:pathData="M37,42 C37,56 41,66 45,69" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0284C7"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:pathData="M71,42 C71,56 67,66 63,69" />
+
+    <!-- Auto-Darkening Welding Visor Filter Glass -->
+    <path
+        android:fillColor="#0F172A"
+        android:strokeColor="#F59E0B"
+        android:strokeWidth="2.0"
+        android:pathData="M43,42 L65,42 L64,52 L44,52 Z" />
+
+    <!-- Golden Visor Reflection Glow -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M45,44 L57,44 L55,50 L43,50 Z" />
+
+    <!-- Bright Electric Arc Welding Spark (Center Star) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,64 L55.5,67.5 L59,69 L55.5,70.5 L54,74 L52.5,70.5 L49,69 L52.5,67.5 Z" />
+
+    <!-- Secondary Sparks -->
+    <path
+        android:fillColor="#FDE047"
+        android:pathData="M46,65 L47,66.5 L48.5,67 L47,67.5 L46,69 L45,67.5 L43.5,67 L45,66.5 Z" />
+    <path
+        android:fillColor="#FDE047"
+        android:pathData="M62,65 L63,66.5 L64.5,67 L63,67.5 L62,69 L61,67.5 L59.5,67 L61,66.5 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,58 L54.7,59.5 L56,60 L54.7,60.5 L54,62 L53.3,60.5 L52,60 L53.3,59.5 Z" />
+</vector>

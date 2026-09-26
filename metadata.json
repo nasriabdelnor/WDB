@@ -1,0 +1,6 @@
+{
+  "name": "WeldTrack DB",
+  "description": "Welding Database & Quality Inspection Dashboard with Excel / Google Sheets sync",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
