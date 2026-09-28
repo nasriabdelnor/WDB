@@ -5,6 +5,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,28 +24,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.East
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.LinearScale
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -81,8 +88,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.IsometricGroup
 import com.example.data.SpoolGroup
@@ -119,16 +129,23 @@ fun WeldsListScreen(
     val lineFilter by viewModel.lineFilter.collectAsStateWithLifecycle()
     val spoolFilter by viewModel.spoolFilter.collectAsStateWithLifecycle()
     val jointFilter by viewModel.jointFilter.collectAsStateWithLifecycle()
+    val duplicateCount by viewModel.duplicateCount.collectAsStateWithLifecycle()
+    val duplicateIds by viewModel.duplicateIds.collectAsStateWithLifecycle()
 
     val availableLines = remember(allWelds) {
-        listOf("ALL") + allWelds.map { it.lineNo }.filter { it.isNotBlank() }.distinct().sorted()
+        val hasBlank = allWelds.any { it.lineNo.isBlank() }
+        val lines = allWelds.map { it.lineNo.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+        listOf("ALL") + (if (hasBlank && lines.isNotEmpty()) listOf("SANS LIGNE") else emptyList()) + lines
     }
     val availableSpools by viewModel.availableSpools.collectAsStateWithLifecycle()
     val availableJoints by viewModel.availableJoints.collectAsStateWithLifecycle()
     val isometricTree by viewModel.isometricTree.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableStateOf(0) } // 0 = Liste, 1 = Arborescence
-    var isHierarchyPanelExpanded by remember { mutableStateOf(true) }
+    var isHierarchyPanelExpanded by remember { mutableStateOf(false) }
+    var showIsoDialog by remember { mutableStateOf(false) }
+    var showSpoolDialog by remember { mutableStateOf(false) }
+    var showJointDialog by remember { mutableStateOf(false) }
 
     val hasActiveFilters = lineFilter != "ALL" || spoolFilter != "ALL" || jointFilter != "ALL" ||
             statusFilter != "ALL" || searchQuery.isNotBlank()
@@ -206,6 +223,30 @@ fun WeldsListScreen(
             )
         )
 
+        // Banner if still showing demo sample welds
+        if (allWelds.size <= 16) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = ElectricCyan.copy(alpha = 0.08f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Info, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Base d'exemple active (16 soudures). Importez votre fichier WDB officiel dans « Synchro WDB » pour charger vos milliers de joints réels.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         if (activeTab == 1) {
             // MODE 2: ARBORESCENCE ISOMÉTRIE (ISO -> SPOOL -> JOINT)
             IsometricTreeView(
@@ -218,7 +259,7 @@ fun WeldsListScreen(
             )
         } else {
             // MODE 1: LISTE FILTRÉE & FILTRES EN CASCADE
-            // HIERARCHICAL FILTER CARD: Isométrie -> Spool -> Joint
+            // HIERARCHICAL FILTER CARD: Compact & Ultra-performant (Isométrie -> Spool -> Joint)
             ElevatedCard(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -230,7 +271,7 @@ fun WeldsListScreen(
                 ),
                 elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(modifier = Modifier.padding(10.dp)) {
                     // Header of filter card
                     Row(
                         modifier = Modifier
@@ -242,7 +283,7 @@ fun WeldsListScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(26.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(ElectricCyan.copy(alpha = 0.15f)),
                                 contentAlignment = Alignment.Center
@@ -251,47 +292,202 @@ fun WeldsListScreen(
                                     imageVector = Icons.Default.AccountTree,
                                     contentDescription = null,
                                     tint = ElectricCyan,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Filtre Arborescence Isométrie",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "Isométrie (Ligne)  →  Spool  →  Joint soudé",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            Text(
+                                text = "Filtres Arborescence (ISO • Spool • Joint)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (hasActiveFilters) {
                                 Text(
-                                    text = "Effacer",
+                                    text = "Effacer tout",
                                     fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                    fontWeight = FontWeight.Bold,
                                     color = RejectRed,
                                     modifier = Modifier
                                         .clickable { viewModel.resetAllFilters() }
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
+                                Spacer(modifier = Modifier.width(4.dp))
                             }
                             Icon(
-                                imageVector = if (isHierarchyPanelExpanded) Icons.Default.Tune else Icons.Default.FilterList,
+                                imageVector = if (isHierarchyPanelExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                 contentDescription = "Basculer",
                                 tint = ElectricCyan,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
 
-                    // Expandable 3-tier dropdown selectors
+                    // 1-Row Compact 3-Button Filter Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // 1. Isométrie Quick Button
+                        Surface(
+                            onClick = { showIsoDialog = true },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (lineFilter != "ALL") ElectricCyan.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, if (lineFilter != "ALL") ElectricCyan else Color.Transparent),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = "1. Isométrie", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        text = if (lineFilter == "ALL") "Toutes (${availableLines.size - 1})" else lineFilter,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (lineFilter != "ALL") ElectricCyan else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (lineFilter != "ALL") {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Effacer ISO",
+                                        tint = RejectRed,
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clickable { viewModel.setLineFilter("ALL") }
+                                    )
+                                } else {
+                                    Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                                }
+                            }
+                        }
+
+                        // 2. Spool Quick Button
+                        Surface(
+                            onClick = { if (availableSpools.size > 1) showSpoolDialog = true },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (spoolFilter != "ALL") WeldAmber.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, if (spoolFilter != "ALL") WeldAmber else Color.Transparent),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = "2. Spool", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        text = if (spoolFilter == "ALL") "Tous (${availableSpools.size - 1})" else spoolFilter,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (spoolFilter != "ALL") WeldAmberDark else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (spoolFilter != "ALL") {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Effacer Spool",
+                                        tint = RejectRed,
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clickable { viewModel.setSpoolFilter("ALL") }
+                                    )
+                                } else {
+                                    Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                                }
+                            }
+                        }
+
+                        // 3. Joint Quick Button
+                        Surface(
+                            onClick = { if (availableJoints.size > 1) showJointDialog = true },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (jointFilter != "ALL") ApprovedGreen.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, if (jointFilter != "ALL") ApprovedGreen else Color.Transparent),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = "3. Joint", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        text = if (jointFilter == "ALL") "Tous (${availableJoints.size - 1})" else jointFilter,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (jointFilter != "ALL") ApprovedGreenDark else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (jointFilter != "ALL") {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Effacer Joint",
+                                        tint = RejectRed,
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clickable { viewModel.setJointFilter("ALL") }
+                                    )
+                                } else {
+                                    Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                                }
+                            }
+                        }
+                    }
+
+                    // Quick Spool chips ONLY if a specific line is active
+                    if (lineFilter != "ALL" && availableSpools.size > 1) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Spools rapides de $lineFilter :",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            val displaySpools = if (availableSpools.size > 30) availableSpools.take(30) else availableSpools
+                            items(displaySpools, key = { "quick_spool_$it" }) { spool ->
+                                val isSelected = spoolFilter == spool
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { viewModel.setSpoolFilter(spool) },
+                                    label = {
+                                        Text(
+                                            if (spool == "ALL") "Tous" else "Spool $spool",
+                                            fontSize = 10.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = WeldAmber.copy(alpha = 0.2f),
+                                        selectedLabelColor = WeldAmberDark
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    // Advanced view if user toggles expansion
                     AnimatedVisibility(
                         visible = isHierarchyPanelExpanded,
                         enter = fadeIn() + expandVertically(),
@@ -303,7 +499,6 @@ fun WeldsListScreen(
                                 .padding(top = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            // 1. Isométrie Selector
                             HierarchicalDropdown(
                                 label = "1. Isométrie (Ligne)",
                                 currentValue = if (lineFilter == "ALL") "Toutes les Isométries" else lineFilter,
@@ -314,7 +509,6 @@ fun WeldsListScreen(
                                 testTag = "dropdown_line"
                             )
 
-                            // 2. Spool Selector (dynamically cascade from line)
                             HierarchicalDropdown(
                                 label = "2. Tronçon / Spool",
                                 currentValue = if (spoolFilter == "ALL") "Tous les Spools (${availableSpools.size - 1})" else spoolFilter,
@@ -326,7 +520,6 @@ fun WeldsListScreen(
                                 testTag = "dropdown_spool"
                             )
 
-                            // 3. Joint Selector (dynamically cascade from line + spool)
                             HierarchicalDropdown(
                                 label = "3. Joint Soudé Spécifique",
                                 currentValue = if (jointFilter == "ALL") "Tous les Joints (${availableJoints.size - 1})" else jointFilter,
@@ -337,125 +530,55 @@ fun WeldsListScreen(
                                 enabled = availableJoints.size > 1,
                                 testTag = "dropdown_joint"
                             )
-
-                            // Quick Spool Selection Chips when an Isométrie is active
-                            if (availableSpools.size > 1) {
-                                Column(modifier = Modifier.padding(top = 2.dp)) {
-                                    Text(
-                                        text = "Spools rapides de la ligne :",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        availableSpools.forEach { spool ->
-                                            val isSelected = spoolFilter == spool
-                                            FilterChip(
-                                                selected = isSelected,
-                                                onClick = { viewModel.setSpoolFilter(spool) },
-                                                label = {
-                                                    Text(
-                                                        if (spool == "ALL") "Tous" else "Spool $spool",
-                                                        fontSize = 10.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                                    )
-                                                },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = WeldAmber.copy(alpha = 0.2f),
-                                                    selectedLabelColor = WeldAmberDark
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Quick Joint Selection Chips when a Spool is active
-                            if (availableJoints.size > 1 && spoolFilter != "ALL") {
-                                Column(modifier = Modifier.padding(top = 2.dp)) {
-                                    Text(
-                                        text = "Joints soudés du spool ($spoolFilter) :",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        availableJoints.forEach { joint ->
-                                            val isSelected = jointFilter == joint
-                                            FilterChip(
-                                                selected = isSelected,
-                                                onClick = { viewModel.setJointFilter(joint) },
-                                                label = {
-                                                    Text(
-                                                        if (joint == "ALL") "Tous" else joint,
-                                                        fontSize = 10.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                                    )
-                                                },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = ApprovedGreen.copy(alpha = 0.2f),
-                                                    selectedLabelColor = ApprovedGreenDark
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Active Breadcrumb trail if any level is active
-                    if (lineFilter != "ALL" || spoolFilter != "ALL" || jointFilter != "ALL") {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Filtre actif :",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            if (lineFilter != "ALL") {
-                                ActiveFilterChip(
-                                    label = "ISO: $lineFilter",
-                                    onClear = { viewModel.setLineFilter("ALL") }
-                                )
-                            }
-
-                            if (spoolFilter != "ALL") {
-                                ActiveFilterChip(
-                                    label = "Spool: $spoolFilter",
-                                    onClear = { viewModel.setSpoolFilter("ALL") }
-                                )
-                            }
-
-                            if (jointFilter != "ALL") {
-                                ActiveFilterChip(
-                                    label = "Joint: $jointFilter",
-                                    onClear = { viewModel.setJointFilter("ALL") }
-                                )
-                            }
                         }
                     }
                 }
+            }
+
+            // Quick Selection Dialogs triggered from the compact 3-button bar
+            if (showIsoDialog) {
+                SearchableSelectionDialog(
+                    title = "Choisir une Isométrie (Ligne)",
+                    items = availableLines,
+                    itemLabel = { if (it == "ALL") "Toutes les Isométries (${availableLines.size - 1})" else it },
+                    currentValue = lineFilter,
+                    accentColor = ElectricCyan,
+                    onDismiss = { showIsoDialog = false },
+                    onItemSelected = { selected ->
+                        viewModel.setLineFilter(selected)
+                        showIsoDialog = false
+                    }
+                )
+            }
+
+            if (showSpoolDialog && availableSpools.size > 1) {
+                SearchableSelectionDialog(
+                    title = if (lineFilter != "ALL") "Spools de $lineFilter" else "Choisir un Spool",
+                    items = availableSpools,
+                    itemLabel = { if (it == "ALL") "Tous les Spools" else "Spool $it" },
+                    currentValue = spoolFilter,
+                    accentColor = WeldAmber,
+                    onDismiss = { showSpoolDialog = false },
+                    onItemSelected = { selected ->
+                        viewModel.setSpoolFilter(selected)
+                        showSpoolDialog = false
+                    }
+                )
+            }
+
+            if (showJointDialog && availableJoints.size > 1) {
+                SearchableSelectionDialog(
+                    title = if (spoolFilter != "ALL") "Joints du spool $spoolFilter" else "Choisir un Joint",
+                    items = availableJoints,
+                    itemLabel = { if (it == "ALL") "Tous les Joints" else "Joint $it" },
+                    currentValue = jointFilter,
+                    accentColor = ApprovedGreen,
+                    onDismiss = { showJointDialog = false },
+                    onItemSelected = { selected ->
+                        viewModel.setJointFilter(selected)
+                        showJointDialog = false
+                    }
+                )
             }
 
             // Status Filter Chips (Horizontal Scroll)
@@ -466,24 +589,28 @@ fun WeldsListScreen(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val statusOptions = listOf(
-                    "ALL" to "Tous (${welds.size})",
-                    "COMPLETED" to "Conformes",
-                    "IN_PROGRESS" to "En cours",
-                    "PENDING_NDT" to "Attente CND",
-                    "REPAIR_REQUIRED" to "Réparations"
-                )
+                val statusOptions = buildList {
+                    add("ALL" to "Tous (${welds.size})")
+                    add("COMPLETED" to "Conformes")
+                    add("IN_PROGRESS" to "En cours")
+                    add("PENDING_NDT" to "Attente CND")
+                    add("REPAIR_REQUIRED" to "Réparations")
+                    if (duplicateCount > 0) {
+                        add("DUPLICATES" to "⚠️ Doublons ($duplicateCount)")
+                    }
+                }
 
                 statusOptions.forEach { (key, label) ->
                     val isSelected = statusFilter == key
+                    val isDuplicateChip = key == "DUPLICATES"
                     FilterChip(
                         selected = isSelected,
                         onClick = { viewModel.setStatusFilter(key) },
-                        label = { Text(label, fontSize = 11.sp) },
+                        label = { Text(label, fontSize = 11.sp, fontWeight = if (isDuplicateChip) FontWeight.Bold else FontWeight.Normal) },
                         modifier = Modifier.testTag("filter_chip_$key"),
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = ElectricCyan.copy(alpha = 0.2f),
-                            selectedLabelColor = ElectricCyan
+                            selectedContainerColor = if (isDuplicateChip) RejectRedContainer else ElectricCyan.copy(alpha = 0.2f),
+                            selectedLabelColor = if (isDuplicateChip) RejectRedDark else ElectricCyan
                         )
                     )
                 }
@@ -559,9 +686,21 @@ fun WeldsListScreen(
                         .padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    if (lineFilter != "ALL" && spoolFilter != "ALL") {
+                        item(key = "spool_traceability_header") {
+                            SpoolTraceabilityHeaderCard(
+                                lineNo = lineFilter,
+                                spoolNo = spoolFilter,
+                                spoolWelds = welds,
+                                onSelectWeld = onSelectWeld
+                            )
+                        }
+                    }
+
                     items(welds, key = { it.id }) { weld ->
                         WeldCardItem(
                             weld = weld,
+                            isDuplicate = duplicateIds.contains(weld.id),
                             onClick = { onSelectWeld(weld) }
                         )
                     }
@@ -586,12 +725,12 @@ private fun HierarchicalDropdown(
     enabled: Boolean = true,
     testTag: String = ""
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    var showDialog by remember { mutableStateOf(false) }
 
-    ExposedDropdownMenuBox(
-        expanded = expanded && enabled,
-        onExpandedChange = { if (enabled) expanded = !expanded },
-        modifier = Modifier.fillMaxWidth().testTag(testTag)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(testTag)
     ) {
         OutlinedTextField(
             value = currentValue,
@@ -601,48 +740,167 @@ private fun HierarchicalDropdown(
             label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
             trailingIcon = {
                 if (enabled) {
-                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+                    IconButton(onClick = { showDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = "Sélectionner",
+                            tint = accentColor
+                        )
+                    }
                 }
             },
             shape = RoundedCornerShape(10.dp),
             modifier = Modifier
-                .menuAnchor()
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { showDialog = true },
             singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = accentColor,
                 unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
             )
         )
+    }
 
-        ExposedDropdownMenu(
-            expanded = expanded && enabled,
-            onDismissRequest = { expanded = false }
+    if (showDialog && enabled) {
+        SearchableSelectionDialog(
+            title = label,
+            items = items,
+            itemLabel = itemLabel,
+            currentValue = currentValue,
+            accentColor = accentColor,
+            onDismiss = { showDialog = false },
+            onItemSelected = { selected ->
+                onItemSelected(selected)
+                showDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun SearchableSelectionDialog(
+    title: String,
+    items: List<String>,
+    itemLabel: (String) -> String,
+    currentValue: String,
+    accentColor: Color,
+    onDismiss: () -> Unit,
+    onItemSelected: (String) -> Unit
+) {
+    var filterText by remember { mutableStateOf("") }
+
+    val filteredList = remember(items, filterText) {
+        if (filterText.isBlank()) {
+            items
+        } else {
+            val q = filterText.trim().lowercase()
+            items.filter { item ->
+                item == "ALL" || item.lowercase().contains(q) || itemLabel(item).lowercase().contains(q)
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.75f)
+                .clip(RoundedCornerShape(16.dp)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
-            items.forEach { item ->
-                val isSelected = (item == "ALL" && currentValue.startsWith("Tout")) || item == currentValue
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = itemLabel(item),
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface
-                            )
-                            if (isSelected) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = accentColor, modifier = Modifier.size(16.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${filteredList.size} option(s) sur ${items.size}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Fermer")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Fast search field
+                OutlinedTextField(
+                    value = filterText,
+                    onValueChange = { filterText = it },
+                    placeholder = { Text("Recherche rapide (ex: SP01, 002)...", fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        if (filterText.isNotEmpty()) {
+                            IconButton(onClick = { filterText = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
                             }
                         }
                     },
-                    onClick = {
-                        onItemSelected(item)
-                        expanded = false
-                    }
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    singleLine = true
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Virtualized LazyColumn with instant recycling
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(filteredList, key = { it }) { item ->
+                        val isSelected = (item == "ALL" && currentValue.startsWith("Tout")) || item == currentValue
+                        Surface(
+                            onClick = { onItemSelected(item) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) accentColor.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = itemLabel(item),
+                                    fontSize = 13.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = accentColor,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -680,10 +938,383 @@ private fun ActiveFilterChip(
     }
 }
 
+@Composable
+private fun SpoolTraceabilityHeaderCard(
+    lineNo: String,
+    spoolNo: String,
+    spoolWelds: List<WeldJoint>,
+    onSelectWeld: (WeldJoint) -> Unit
+) {
+    var isExpanded by remember { mutableStateOf(true) }
+
+    val drawingNo = spoolWelds.firstOrNull { it.drawingNo.isNotBlank() }?.drawingNo ?: ""
+    val completedCount = spoolWelds.count { it.isFullyAccepted }
+    val repairCount = spoolWelds.count { it.isRepairRequired }
+    val pendingNdtCount = spoolWelds.count { it.isPendingNdt }
+    val completionPct = if (spoolWelds.isNotEmpty()) (completedCount * 100) / spoolWelds.size else 0
+
+    // Distinct heat numbers in this spool
+    val heatNumbers = remember(spoolWelds) {
+        spoolWelds.flatMap { listOf(it.heatNo1.trim(), it.heatNo2.trim()) }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("spool_traceability_header_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            // Header Row: Spool identity and expand toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(IndustrialNavy800),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Layers,
+                            contentDescription = null,
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (spoolNo.equals("SANS SPOOL", ignoreCase = true) || spoolNo.isBlank()) "SOUDURES CHANTIER (SANS SPOOL)" else "SPOOL $spoolNo",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Text(
+                            text = "Isométrie : $lineNo" + if (drawingNo.isNotBlank()) " • Plan : $drawingNo" else "",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ElectricCyan
+                        )
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Badge percentage
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (completionPct == 100) ApprovedGreenContainer else ElectricCyanContainer
+                    ) {
+                        Text(
+                            text = "$completionPct%",
+                            color = if (completionPct == 100) ApprovedGreenDark else ElectricCyan,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = isExpanded) {
+                Column(modifier = Modifier.padding(top = 10.dp)) {
+                    // Quick Stats Bar
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text("Total Joints", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${spoolWelds.size}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            color = ApprovedGreenContainer.copy(alpha = 0.5f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text("Conformes", fontSize = 10.sp, color = ApprovedGreenDark)
+                                Text("$completedCount", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ApprovedGreenDark)
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (repairCount > 0) RejectRedContainer.copy(alpha = 0.5f) else ElectricCyanContainer.copy(alpha = 0.5f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text(if (repairCount > 0) "À Réparer" else "Attente CND", fontSize = 10.sp, color = if (repairCount > 0) RejectRedDark else ElectricCyan)
+                                Text("${if (repairCount > 0) repairCount else pendingNdtCount}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = if (repairCount > 0) RejectRedDark else ElectricCyan)
+                            }
+                        }
+                    }
+
+                    // Heat Numbers summary pills if available
+                    if (heatNumbers.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Coulées du spool :",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                heatNumbers.forEach { heat ->
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(ElectricCyan.copy(alpha = 0.12f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = heat,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ElectricCyan
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Title for Detailed Joint Traceability Table
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Traçabilité des Pièces & N° Coulée (Heat Numbers)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${spoolWelds.size} joints",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // List of joints with Part 1, Part 2, and Heat numbers
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                spoolWelds.forEach { weld ->
+                                    SpoolJointTraceabilityRow(
+                                        weld = weld,
+                                        onClick = { onSelectWeld(weld) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SpoolJointTraceabilityRow(
+    weld: WeldJoint,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            // Line 1: Joint badge + Specs + Status
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(IndustrialNavy800)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = weld.jointNo,
+                            color = Color.White,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Ø ${weld.diameterInch}\" • ${weld.thicknessMm}mm • ${weld.material}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                WeldOverallStatusBadge(weld = weld)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Line 2: The Core Request: Partie 1, Partie 2, Heat 1, Heat 2!
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Partie 1 & Heat 1
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Partie 1: " + weld.part1.ifBlank { "Composant 1" },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Coulée : ",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = weld.heatNo1.ifBlank { "—" },
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (weld.heatNo1.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.East,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .size(14.dp)
+                    )
+
+                    // Partie 2 & Heat 2
+                    Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "Partie 2: " + weld.part2.ifBlank { "Composant 2" },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Coulée : ",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = weld.heatNo2.ifBlank { "—" },
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (weld.heatNo2.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Line 3: Soudeur & DMOS & inspection summary
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Soudeur : ${weld.welderId} • DMOS: ${weld.wpsNo}",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "CND: ${weld.ndtType} (${weld.ndtResult})",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (weld.ndtResult == "ACCEPTED") ApprovedGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WeldCardItem(
     weld: WeldJoint,
+    isDuplicate: Boolean = false,
     onClick: () -> Unit
 ) {
     ElevatedCard(
@@ -737,7 +1368,24 @@ private fun WeldCardItem(
                     }
                 }
 
-                WeldOverallStatusBadge(weld = weld)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isDuplicate) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = RejectRedContainer,
+                            modifier = Modifier.padding(end = 6.dp)
+                        ) {
+                            Text(
+                                text = "⚠️ DOUBLON",
+                                color = RejectRedDark,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    WeldOverallStatusBadge(weld = weld)
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -784,6 +1432,82 @@ private fun WeldCardItem(
                     label = "${weld.ndtType}: ${weld.ndtResult}",
                     status = weld.ndtResult
                 )
+            }
+
+            // Traceability: Part 1 & Heat No 1 -> Part 2 & Heat No 2 (Always visible for clarity)
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Part 1 & Heat 1
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Partie 1: ${weld.part1.ifBlank { "Composant 1" }}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Coulée : ",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = weld.heatNo1.ifBlank { "—" },
+                                fontSize = 10.sp,
+                                color = if (weld.heatNo1.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = if (weld.heatNo1.isNotBlank()) FontWeight.ExtraBold else FontWeight.Normal
+                            )
+                        }
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.East,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .size(14.dp)
+                    )
+
+                    // Part 2 & Heat 2
+                    Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "Partie 2: ${weld.part2.ifBlank { "Composant 2" }}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Coulée : ",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = weld.heatNo2.ifBlank { "—" },
+                                fontSize = 10.sp,
+                                color = if (weld.heatNo2.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = if (weld.heatNo2.isNotBlank()) FontWeight.ExtraBold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -1063,7 +1787,7 @@ private fun SpoolAccordionItem(
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "SPOOL ${spoolGroup.spoolNo}",
+                            text = if (spoolGroup.spoolNo.equals("Sans Spool", ignoreCase = true) || spoolGroup.spoolNo == "SANS SPOOL") "CHANTIER (SANS SPOOL)" else "SPOOL ${spoolGroup.spoolNo}",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 11.sp,
                             color = WeldAmberDark
@@ -1127,54 +1851,122 @@ private fun JointTreeRow(
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(IndustrialNavy800)
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = weld.jointNo,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(IndustrialNavy800)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = weld.jointNo,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Column {
+                        Text(
+                            text = "Ø ${weld.diameterInch}\" ${weld.weldType} • ${weld.material}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Soudeur: ${weld.welderId} (${weld.welderName.ifBlank { "N/A" }})",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Column {
-                    Text(
-                        text = "Ø ${weld.diameterInch}\" ${weld.weldType} • ${weld.material}",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Soudeur: ${weld.welderId} (${weld.welderName.ifBlank { "N/A" }})",
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    WeldOverallStatusBadge(weld = weld)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Modifier",
+                        tint = ElectricCyan,
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                WeldOverallStatusBadge(weld = weld)
-                Spacer(modifier = Modifier.width(6.dp))
-                Icon(
-                    imageVector = Icons.Default.Edit,
-                    contentDescription = "Modifier",
-                    tint = ElectricCyan,
-                    modifier = Modifier.size(14.dp)
-                )
+            // Traçabilité Matériaux : Partie 1 & Coulée 1 -> Partie 2 & Coulée 2
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "P1: ${weld.part1.ifBlank { "Composant 1" }}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "[${weld.heatNo1.ifBlank { "—" }}]",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (weld.heatNo1.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.East,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .size(12.dp)
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "P2: ${weld.part2.ifBlank { "Composant 2" }}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "[${weld.heatNo2.ifBlank { "—" }}]",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (weld.heatNo2.isNotBlank()) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }

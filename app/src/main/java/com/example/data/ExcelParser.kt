@@ -2,7 +2,6 @@ package com.example.data
 
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
-import java.io.BufferedReader
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.text.SimpleDateFormat
@@ -14,6 +13,7 @@ object ExcelParser {
 
     /**
      * Parses an input stream that could be XLSX, CSV, or TSV.
+     * Fully compatible with industrial WDB files (TECNOGRAF, SARPI-DZ, Sonatrach, Saipem, WCP).
      */
     fun parseStream(inputStream: InputStream, filenameHint: String = ""): List<WeldJoint> {
         val bytes = inputStream.readBytes()
@@ -23,7 +23,7 @@ object ExcelParser {
         val isZip = bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
                     bytes[2] == 0x03.toByte() && bytes[3] == 0x04.toByte()
 
-        return if (isZip || filenameHint.endsWith(".xlsx", ignoreCase = true)) {
+        return if (isZip || filenameHint.endsWith(".xlsx", ignoreCase = true) || filenameHint.endsWith(".xlsm", ignoreCase = true)) {
             parseXlsxBytes(bytes)
         } else {
             parseCsvOrTsv(bytes)
@@ -46,27 +46,36 @@ object ExcelParser {
         }
 
         val rows = lines.map { parseCsvLine(it, delimiter) }
-        return extractWeldsFromRows(rows)
+        return extractWeldsFromRows(rows, sheetFallbackName = "WDB")
     }
 
     private fun parseCsvLine(line: String, delimiter: Char): List<String> {
         val result = mutableListOf<String>()
         val sb = StringBuilder()
         var inQuotes = false
+        var cellStartedWithQuote = false
         var i = 0
 
         while (i < line.length) {
             val c = line[i]
             if (c == '"') {
-                if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
-                    sb.append('"')
-                    i++
+                if (!inQuotes && sb.isEmpty()) {
+                    inQuotes = true
+                    cellStartedWithQuote = true
+                } else if (inQuotes) {
+                    if (i + 1 < line.length && line[i + 1] == '"') {
+                        sb.append('"')
+                        i++
+                    } else {
+                        inQuotes = false
+                    }
                 } else {
-                    inQuotes = !inQuotes
+                    sb.append('"')
                 }
             } else if (c == delimiter && !inQuotes) {
                 result.add(sb.toString().trim())
                 sb.clear()
+                cellStartedWithQuote = false
             } else {
                 sb.append(c)
             }
@@ -77,12 +86,17 @@ object ExcelParser {
     }
 
     /**
-     * High-speed native XLSX parsing supporting multi-sheet, rich-text, and industrial templates
-     * (e.g., TECNOGRAF, Spooling WDB, Skikda piping databases).
+     * High-speed native XLSX parsing supporting:
+     * - Multi-sheet workbooks (aggregates all sheets containing valid welding data)
+     * - Multi-row / stacked headers (categories + subheaders)
+     * - Vertical merged cells propagation (ISO lines and Spools remain associated to all joints)
+     * - Accurate field weld vs shop spool differentiation
+     * - Comprehensive header mapping (French, English, Italian industrial piping)
      */
     fun parseXlsxBytes(bytes: ByteArray): List<WeldJoint> {
         val sharedStrings = mutableListOf<String>()
         val sheets = mutableMapOf<String, ByteArray>()
+        var workbookXmlBytes: ByteArray? = null
 
         try {
             val zis = ZipInputStream(ByteArrayInputStream(bytes))
@@ -93,6 +107,8 @@ object ExcelParser {
                     sharedStrings.addAll(parseSharedStrings(zis.readBytes()))
                 } else if (name.startsWith("xl/worksheets/sheet") && name.endsWith(".xml")) {
                     sheets[name] = zis.readBytes()
+                } else if (name == "xl/workbook.xml") {
+                    workbookXmlBytes = zis.readBytes()
                 }
                 zis.closeEntry()
                 entry = zis.nextEntry
@@ -105,18 +121,57 @@ object ExcelParser {
 
         if (sheets.isEmpty()) return emptyList()
 
-        // Evaluate all sheets and choose the one with the best welding database rows
-        var bestWelds = emptyList<WeldJoint>()
+        val sheetNamesMap = parseSheetNamesFromWorkbook(workbookXmlBytes)
+        val allWelds = mutableListOf<WeldJoint>()
 
-        for ((sheetName, sheetBytes) in sheets) {
+        // Sort sheets in natural order (sheet1.xml, sheet2.xml, etc.)
+        val sortedSheetKeys = sheets.keys.sortedWith(Comparator { a, b ->
+            val numA = a.filter { it.isDigit() }.toIntOrNull() ?: 0
+            val numB = b.filter { it.isDigit() }.toIntOrNull() ?: 0
+            numA.compareTo(numB)
+        })
+
+        for (sheetKey in sortedSheetKeys) {
+            val sheetBytes = sheets[sheetKey] ?: continue
+            val sheetIndex = sheetKey.filter { it.isDigit() }.toIntOrNull() ?: 1
+            val humanSheetName = sheetNamesMap[sheetIndex] ?: "Feuille $sheetIndex"
+
             val rows = parseSheetXml(sheetBytes, sharedStrings)
-            val welds = extractWeldsFromRows(rows)
-            if (welds.size > bestWelds.size) {
-                bestWelds = welds
+            val welds = extractWeldsFromRows(rows, sheetFallbackName = humanSheetName)
+            if (welds.isNotEmpty()) {
+                allWelds.addAll(welds)
             }
         }
 
-        return bestWelds
+        return allWelds
+    }
+
+    private fun parseSheetNamesFromWorkbook(workbookXmlBytes: ByteArray?): Map<Int, String> {
+        val map = mutableMapOf<Int, String>()
+        if (workbookXmlBytes == null) return map
+
+        try {
+            val factory = XmlPullParserFactory.newInstance()
+            val parser = factory.newPullParser()
+            parser.setInput(ByteArrayInputStream(workbookXmlBytes), "UTF-8")
+
+            var eventType = parser.eventType
+            var sheetIndexCounter = 1
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                if (eventType == XmlPullParser.START_TAG && parser.name == "sheet") {
+                    val name = parser.getAttributeValue(null, "name")
+                    val sheetId = parser.getAttributeValue(null, "sheetId")?.toIntOrNull() ?: sheetIndexCounter
+                    if (!name.isNullOrBlank()) {
+                        map[sheetId] = name.trim()
+                    }
+                    sheetIndexCounter++
+                }
+                eventType = parser.next()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return map
     }
 
     private fun parseSharedStrings(xmlBytes: ByteArray): List<String> {
@@ -258,13 +313,13 @@ object ExcelParser {
 
     /**
      * Intelligently scans rows to find the actual table header row, then parses all data rows.
+     * Handles stacked headers and vertical merged-cells fill-down.
      */
-    private fun extractWeldsFromRows(rows: List<List<String>>): List<WeldJoint> {
+    private fun extractWeldsFromRows(rows: List<List<String>>, sheetFallbackName: String): List<WeldJoint> {
         if (rows.size < 2) return emptyList()
 
-        // 1. Locate the header row by scoring keywords in the first 25 rows
-        val maxHeaderScan = minOf(25, rows.size)
-        var bestHeaderRowIdx = 0
+        val maxHeaderScan = minOf(30, rows.size)
+        var bestHeaderRowIdx = -1
         var bestScore = -1
 
         for (i in 0 until maxHeaderScan) {
@@ -275,47 +330,187 @@ object ExcelParser {
             }
         }
 
-        val headerRow = rows[bestHeaderRowIdx].map { it.trim() }
-        val headerIndices = mapHeaders(headerRow)
+        // Must find at least 2 relevant welding keywords to qualify as a valid welding data table
+        if (bestScore < 2 || bestHeaderRowIdx == -1) {
+            return emptyList()
+        }
+
+        // Multi-tier header resolution: combine adjacent header rows if row i+1 or row i-1 is also a header
+        val (headerIndices, dataStartIdx) = buildStackedHeaderIndices(rows, bestHeaderRowIdx)
 
         val welds = mutableListOf<WeldJoint>()
-        for (i in (bestHeaderRowIdx + 1) until rows.size) {
+        var lastValidLineNo = ""
+        var lastValidSpoolNo = ""
+        var lastValidDrawingNo = ""
+        var lastValidWpsNo = ""
+        var lastValidMaterial = ""
+
+        for (i in dataStartIdx until rows.size) {
             val row = rows[i]
             if (row.isEmpty() || row.all { it.isBlank() }) continue
 
             // Skip summary/subtotal or signature lines
-            val firstCell = row.firstOrNull { it.isNotBlank() }?.lowercase() ?: ""
-            if (firstCell.startsWith("total") || firstCell.startsWith("sum") || firstCell.startsWith("visa") || firstCell.startsWith("sign")) {
+            val firstCell = row.firstOrNull { it.isNotBlank() }?.lowercase()?.trim() ?: ""
+            if (firstCell.startsWith("total") || firstCell.startsWith("sum") ||
+                firstCell.startsWith("visa") || firstCell.startsWith("sign") ||
+                firstCell.startsWith("page ") || firstCell.contains("approb") ||
+                firstCell.startsWith("date :") || firstCell.startsWith("date:")
+            ) {
                 continue
             }
 
-            val weld = buildWeldFromRow(row, headerIndices, fallbackIndex = welds.size + 1)
-            // Ensure weld has at least some meaningful identification
-            if (weld.jointNo.isNotBlank()) {
-                welds.add(weld)
+            // Read raw values from row
+            fun getCell(idx: Int): String = if (idx in row.indices) row[idx].trim() else ""
+
+            val rawJoint = getCell(headerIndices.jointNo)
+            val rawLine = getCell(headerIndices.lineNo)
+            val rawSpool = getCell(headerIndices.spoolNo)
+            val rawDrawing = getCell(headerIndices.drawingNo)
+            val rawWps = getCell(headerIndices.wpsNo)
+            val rawMaterial = getCell(headerIndices.material)
+
+            // If the row doesn't have a joint, a line, and a spool, it is an empty or separator row
+            if (rawJoint.isBlank() && rawLine.isBlank() && rawSpool.isBlank()) {
+                continue
             }
+
+            // Carry-forward / fill-down for merged vertical cells in Excel
+            if (rawLine.isNotBlank()) {
+                if (rawLine != lastValidLineNo) {
+                    lastValidLineNo = rawLine
+                    // If line changed, reset spool unless row explicitly defines a spool
+                    lastValidSpoolNo = if (rawSpool.isNotBlank()) rawSpool else ""
+                }
+            }
+
+            if (rawSpool.isNotBlank()) {
+                lastValidSpoolNo = rawSpool
+            }
+
+            if (rawDrawing.isNotBlank()) lastValidDrawingNo = rawDrawing
+            if (rawWps.isNotBlank()) lastValidWpsNo = rawWps
+            if (rawMaterial.isNotBlank()) lastValidMaterial = rawMaterial
+
+            // Effective Line
+            val effectiveLine = when {
+                rawLine.isNotBlank() -> rawLine
+                lastValidLineNo.isNotBlank() -> lastValidLineNo
+                sheetFallbackName.isNotBlank() -> sheetFallbackName
+                else -> "ISO-01"
+            }
+
+            // Effective Spool
+            val effectiveSpool = when {
+                rawSpool.isNotBlank() -> rawSpool
+                lastValidSpoolNo.isNotBlank() -> lastValidSpoolNo
+                else -> "" // Left blank if field weld / unspooled
+            }
+
+            // Effective Joint No
+            val effectiveJoint = when {
+                rawJoint.isNotBlank() -> rawJoint
+                else -> "W-${welds.size + 1}"
+            }
+
+            val weld = buildWeldFromRow(
+                row = row,
+                h = headerIndices,
+                effectiveLine = effectiveLine,
+                effectiveSpool = effectiveSpool,
+                effectiveJoint = effectiveJoint,
+                lastValidDrawing = lastValidDrawingNo,
+                lastValidWps = lastValidWpsNo,
+                lastValidMat = lastValidMaterial,
+                fallbackIndex = welds.size + 1
+            )
+
+            welds.add(weld)
         }
+
         return welds
+    }
+
+    private fun buildStackedHeaderIndices(rows: List<List<String>>, bestRowIdx: Int): Pair<HeaderIndices, Int> {
+        val maxCol = rows[bestRowIdx].size
+        val bestScore = scoreHeaderRow(rows[bestRowIdx])
+        val hasSubheader = bestRowIdx + 1 < rows.size && isSubheaderRow(rows[bestRowIdx + 1], bestScore)
+
+        val combinedHeaders = (0 until maxCol).map { col ->
+            val parts = mutableListOf<String>()
+
+            // Check previous row if it looks like a parent header
+            if (bestRowIdx > 0 && isSubheaderRow(rows[bestRowIdx - 1], bestScore)) {
+                val prev = rows[bestRowIdx - 1].getOrNull(col)?.trim() ?: ""
+                if (prev.isNotBlank()) parts.add(prev)
+            }
+
+            val current = rows[bestRowIdx].getOrNull(col)?.trim() ?: ""
+            if (current.isNotBlank()) parts.add(current)
+
+            // Check next row if it looks like a subheader
+            if (hasSubheader) {
+                val next = rows[bestRowIdx + 1].getOrNull(col)?.trim() ?: ""
+                if (next.isNotBlank()) parts.add(next)
+            }
+
+            parts.joinToString(" ")
+        }
+
+        val indices = mapHeaders(combinedHeaders)
+
+        // Determine where actual data rows start
+        val dataStart = if (hasSubheader) bestRowIdx + 2 else bestRowIdx + 1
+
+        return Pair(indices, dataStart)
+    }
+
+    private fun isSubheaderRow(row: List<String>, parentHeaderScore: Int): Boolean {
+        if (row.isEmpty() || row.all { it.isBlank() }) return false
+
+        // Data rows have numeric entries (e.g. 6.0, 7.11, 8, etc.) or joint numbers
+        val hasNumbers = row.any { it.matches(Regex("""^-?\d+([.,]\d+)?$""")) }
+        if (hasNumbers) return false
+
+        val firstCell = row.firstOrNull { it.isNotBlank() }?.trim() ?: ""
+        if (firstCell.matches(Regex("""^[WwJj]-?\d+.*""")) ||
+            firstCell.matches(Regex("""^\d{1,4}[A-Za-z]?$"""))
+        ) {
+            return false
+        }
+
+        val score = scoreHeaderRow(row)
+        return score >= 3 && score >= (parentHeaderScore / 2)
     }
 
     private fun scoreHeaderRow(row: List<String>): Int {
         var score = 0
-        val keywords = listOf(
-            "joint", "weld", "soudure", "giunto",
-            "line", "ligne", "linea", "iso", "piping",
-            "spool", "troncon", "tronçon",
-            "welder", "soudeur", "saldatore", "stamp", "poinçon", "poincon",
-            "wps", "dmos", "qmos",
-            "dia", "diameter", "diametre", "diamètre", "inch", "pouce", "dn",
-            "thick", "epaisseur", "épaisseur", "spessore", "wt",
-            "mat", "material", "materiau", "matériau", "spec",
-            "ndt", "cnd", "rt", "ut", "pt", "mt", "vt",
-            "fitup", "fit-up", "pointage", "visuel", "visual"
+        val longKeywords = listOf(
+            "joint", "soudure", "giunto",
+            "ligne", "linea", "piping",
+            "spool", "troncon", "tronçon", "tronc", "pezzo", "repère", "repere",
+            "welder", "soudeur", "saldatore", "poinçon", "poincon", "matricule",
+            "procedure", "procédé", "procede",
+            "diameter", "diametre", "diamètre", "pouce",
+            "thick", "epaisseur", "épaisseur", "spessore",
+            "material", "materiau", "matériau", "nuance",
+            "pointage", "visuel", "visual", "rapport",
+            "partie", "composant", "element", "élément"
         )
+        val shortKeywords = setOf(
+            "iso", "wps", "dmos", "qmos", "cnd", "ndt", "rt", "ut", "pt", "mt", "vt",
+            "dn", "wt", "dia", "mat", "rep", "coul", "heat", "cast", "charge", "cce", "weld", "line", "stamp"
+        )
+
         for (cell in row) {
             val c = cell.lowercase().trim()
-            if (keywords.any { c.contains(it) }) {
+            if (c.isBlank()) continue
+            if (longKeywords.any { c.contains(it) }) {
                 score++
+            } else {
+                val words = c.split(Regex("[^a-z0-9]+"))
+                if (words.any { it in shortKeywords }) {
+                    score++
+                }
             }
         }
         return score
@@ -341,7 +536,12 @@ object ExcelParser {
         val ndtResult: Int = -1,
         val ndtReport: Int = -1,
         val status: Int = -1,
-        val notes: Int = -1
+        val notes: Int = -1,
+        val part1: Int = -1,
+        val part2: Int = -1,
+        val heatNo1: Int = -1,
+        val heatNo2: Int = -1,
+        val singleHeatNo: Int = -1
     )
 
     private fun mapHeaders(headers: List<String>): HeaderIndices {
@@ -365,28 +565,126 @@ object ExcelParser {
         var ndtReport = -1
         var status = -1
         var notes = -1
+        var part1 = -1
+        var part2 = -1
+        var heatNo1 = -1
+        var heatNo2 = -1
+        var singleHeatNo = -1
 
+        // 1. First pass: High-precision matching for Joint, Line, Spool
         for ((idx, hRaw) in headers.withIndex()) {
             val h = hRaw.lowercase().trim()
+
+            // Isométrie / Ligne
+            if (lineNo == -1) {
+                if (h.contains("iso") || h.contains("isometrique") || h.contains("isométrique") ||
+                    h.contains("isometric") || h.contains("line no") || h.contains("ligne") ||
+                    h.contains("linea") || h.contains("piping") || h.contains("n° ligne") ||
+                    h.contains("no ligne") || h.contains("n° iso") || h.contains("no iso") ||
+                    h.contains("code ligne") || h.contains("ligne n°") || h.contains("iso n°")
+                ) {
+                    lineNo = idx
+                }
+            }
+
+            // Tronçon / Spool
+            if (spoolNo == -1) {
+                if (h.contains("spool") || h.contains("troncon") || h.contains("tronçon") ||
+                    h.contains("tronc") || h.contains("pezzo") || h.contains("pezzi") ||
+                    h.contains("rep spool") || h.contains("rep. spool") || h.contains("repère spool") ||
+                    h.contains("repere spool") || h.contains("rep. tronçon") || h.contains("rep. troncon") ||
+                    h.contains("rep.") || h == "rep" || h == "repere" || h == "repère" ||
+                    h.contains("repere") || h.contains("repère") || h.contains("mark") ||
+                    h.contains("piece") || h.contains("pièce") || h.contains("skid") ||
+                    h.contains("spl") || h.contains("prefab") || h.contains("element") ||
+                    h.contains("élément") || h.contains("spool no") || h.contains("spool n°") ||
+                    h.contains("n° spool") || h.contains("no spool")
+                ) {
+                    spoolNo = idx
+                }
+            }
+
+            // Joint No (Exact / Explicit match first)
+            if (jointNo == -1) {
+                if (h.contains("joint no") || h.contains("joint n°") || h.contains("n° joint") ||
+                    h.contains("no joint") || h.contains("weld no") || h.contains("weld n°") ||
+                    h.contains("n° soudure") || h.contains("soudure n°") || h.contains("no soudure") ||
+                    h.contains("weld id") || h.contains("giunto") || h.contains("weld_id") ||
+                    h == "jnt" || h == "w#" || h == "j#" || h.contains("joint/weld")
+                ) {
+                    jointNo = idx
+                }
+            }
+        }
+
+        // 2. Second pass: Other technical welding & CND columns, Parts & Heat Numbers
+        for ((idx, hRaw) in headers.withIndex()) {
+            val h = hRaw.lowercase().trim()
+            if (idx == lineNo || idx == spoolNo || idx == jointNo) continue
+
             when {
-                jointNo == -1 && (h.contains("joint") || h.contains("weld no") || h.contains("soudure") || h.contains("giunto") || h == "no" || h == "n°" || h == "weld_id" || h == "weld" || h == "jnt") -> jointNo = idx
-                lineNo == -1 && (h.contains("line") || h.contains("ligne") || h.contains("linea") || h.contains("iso") || h.contains("piping")) -> lineNo = idx
-                spoolNo == -1 && (h.contains("spool") || h.contains("troncon") || h.contains("tronçon") || h.contains("pezzo")) -> spoolNo = idx
+                // Secondary check for Joint if not found
+                jointNo == -1 && (h.contains("soudure") || h.contains("joint") || h.contains("weld") || h == "no" || h == "n°") -> jointNo = idx
+
+                // Parts / Composants (Partie 1 & Partie 2)
+                part1 == -1 && (h.contains("part 1") || h.contains("partie 1") || h.contains("partie1") || h.contains("part_1") ||
+                    h.contains("element 1") || h.contains("élément 1") || h.contains("element1") || h.contains("élément1") ||
+                    h.contains("item 1") || h.contains("item1") || h.contains("comp 1") || h.contains("comp1") ||
+                    h.contains("composant 1") || h.contains("composant1") || h.contains("piece 1") || h.contains("pièce 1") ||
+                    h.contains("desig 1") || h.contains("désig 1") || h.contains("designation 1") || h.contains("désignation 1") ||
+                    h.contains("mat 1") || h.contains("matiere 1") || h.contains("matière 1") ||
+                    h == "p1" || h == "elt 1" || h.contains("type 1") || h.contains("part(1)")
+                ) -> part1 = idx
+
+                part2 == -1 && (h.contains("part 2") || h.contains("partie 2") || h.contains("partie2") || h.contains("part_2") ||
+                    h.contains("element 2") || h.contains("élément 2") || h.contains("element2") || h.contains("élément2") ||
+                    h.contains("item 2") || h.contains("item2") || h.contains("comp 2") || h.contains("comp2") ||
+                    h.contains("composant 2") || h.contains("composant2") || h.contains("piece 2") || h.contains("pièce 2") ||
+                    h.contains("desig 2") || h.contains("désig 2") || h.contains("designation 2") || h.contains("désignation 2") ||
+                    h.contains("mat 2") || h.contains("matiere 2") || h.contains("matière 2") ||
+                    h == "p2" || h == "elt 2" || h.contains("type 2") || h.contains("part(2)")
+                ) -> part2 = idx
+
+                // Heat Numbers / N° de Coulée
+                heatNo1 == -1 && (h.contains("heat 1") || h.contains("heat no 1") || h.contains("heat no. 1") || h.contains("heat n° 1") ||
+                    h.contains("heat_1") || h.contains("heat1") || h.contains("coulee 1") || h.contains("coulée 1") ||
+                    h.contains("coulee1") || h.contains("coulée1") || h.contains("n° coulee 1") || h.contains("n° coulée 1") ||
+                    h.contains("no coulee 1") || h.contains("no coulée 1") || h.contains("cce 1") || h.contains("cce1") ||
+                    h.contains("ccm 1") || h.contains("ccm1") || h.contains("heat(1)") || h.contains("ht 1") || h.contains("ht1") ||
+                    h.contains("coul. 1") || h.contains("coul 1") || h.contains("coul1") || h.contains("coul.1") ||
+                    h.contains("cast 1") || h.contains("charge 1") || h.contains("lot 1")
+                ) -> heatNo1 = idx
+
+                heatNo2 == -1 && (h.contains("heat 2") || h.contains("heat no 2") || h.contains("heat no. 2") || h.contains("heat n° 2") ||
+                    h.contains("heat_2") || h.contains("heat2") || h.contains("coulee 2") || h.contains("coulée 2") ||
+                    h.contains("coulee2") || h.contains("coulée2") || h.contains("n° coulee 2") || h.contains("n° coulée 2") ||
+                    h.contains("no coulee 2") || h.contains("no coulée 2") || h.contains("cce 2") || h.contains("cce2") ||
+                    h.contains("ccm 2") || h.contains("ccm2") || h.contains("heat(2)") || h.contains("ht 2") || h.contains("ht2") ||
+                    h.contains("coul. 2") || h.contains("coul 2") || h.contains("coul2") || h.contains("coul.2") ||
+                    h.contains("cast 2") || h.contains("charge 2") || h.contains("lot 2")
+                ) -> heatNo2 = idx
+
+                singleHeatNo == -1 && (h.contains("heat no") || h.contains("heat number") || h.contains("heat n°") ||
+                    h.contains("n° coulee") || h.contains("n° coulée") || h.contains("no coulee") || h.contains("coulée") ||
+                    h.contains("coulee") || h.contains("cce") || h.contains("ccm") || h == "heat" || h == "ht" ||
+                    h.contains("coulée/heat") || h.contains("coulee/heat") || h.contains("heat/coulée")
+                ) -> singleHeatNo = idx
+
                 drawingNo == -1 && (h.contains("drawing") || h.contains("plan") || h.contains("dwg") || h.contains("disegno")) -> drawingNo = idx
                 welderName == -1 && (h.contains("nom") || h.contains("welder name") || h.contains("nom soudeur") || h.contains("nome")) -> welderName = idx
-                welderId == -1 && (h.contains("welder") || h.contains("soudeur") || h.contains("saldatore") || h.contains("stamp") || h.contains("poinçon") || h.contains("poincon") || h == "w" || h == "op") -> welderId = idx
-                wpsNo == -1 && (h.contains("wps") || h.contains("dmos") || h.contains("qmos") || h.contains("procedure")) -> wpsNo = idx
+                welderId == -1 && (h.contains("welder") || h.contains("soudeur") || h.contains("saldatore") || h.contains("stamp") || h.contains("poinçon") || h.contains("poincon") || h.contains("matricule") || h == "w" || h == "op") -> welderId = idx
+                wpsNo == -1 && (h.contains("wps") || h.contains("dmos") || h.contains("qmos") || h.contains("procedure") || h.contains("pqr")) -> wpsNo = idx
                 process == -1 && (h.contains("process") || h.contains("procédé") || h.contains("procede") || h.contains("proc")) -> process = idx
                 weldType == -1 && (h.contains("type") || h.contains("tipo") || h.contains("bw/sw") || h.contains("joint type")) -> weldType = idx
-                material == -1 && (h.contains("material") || h.contains("matériau") || h.contains("materiau") || h.contains("materiale") || h.contains("nuance") || h.contains("metal")) -> material = idx
+                material == -1 && (h.contains("material") || h.contains("matériau") || h.contains("materiau") || h.contains("materiale") || h.contains("nuance") || h.contains("metal") || h.contains("grade")) -> material = idx
                 diameter == -1 && (h.contains("dia") || h.contains("pouce") || h.contains("inch") || h.contains("dn") || h.contains("size") || h.contains("nd") || h == "ø") -> diameter = idx
                 thickness == -1 && (h.contains("thick") || h.contains("epaisseur") || h.contains("épaisseur") || h.contains("spessore") || h.contains("ép") || h.contains("ep") || h.contains("sched") || h.contains("wt")) -> thickness = idx
                 weldDate == -1 && (h.contains("date") || h.contains("data") && !h.contains("fitup") && !h.contains("visuel") && !h.contains("ndt")) -> weldDate = idx
                 fitup == -1 && (h.contains("fitup") || h.contains("fit-up") || h.contains("pointage") || h.contains("assemblage") || h.contains("accoppiamento")) -> fitup = idx
                 visual == -1 && (h.contains("visuel") || h.contains("vt") || h.contains("visual") || h.contains("visivo")) -> visual = idx
                 ndtReport == -1 && (h.contains("report") || h.contains("rapport") || h.contains("pv") || h.contains("doc")) -> ndtReport = idx
-                ndtResult == -1 && (h.contains("ndt res") || h.contains("cnd res") || h.contains("rt res") || h.contains("result") || h.contains("esito")) -> ndtResult = idx
-                ndtType == -1 && (h.contains("ndt") || h.contains("cnd") || h.contains("controle") || h.contains("contrôle") || h.contains("controllo")) -> ndtType = idx
+                ndtResult == -1 && (h.contains("ndt res") || h.contains("cnd res") || h.contains("rt res") || h.contains("result") || h.contains("résultat") || h.contains("resultat") || h.contains("esito") || h.contains("decision") || h.contains("décision")) -> ndtResult = idx
+                ndtType == -1 && (h.contains("ndt") || h.contains("cnd") || h.contains("rt") || h.contains("ut") || h.contains("controle") || h.contains("contrôle")) -> ndtType = idx
                 status == -1 && (h.contains("status") || h.contains("statut") || h.contains("etat") || h.contains("état") || h.contains("stato")) -> status = idx
                 notes == -1 && (h.contains("note") || h.contains("remarque") || h.contains("obs") || h.contains("comment") || h.contains("annotazioni")) -> notes = idx
             }
@@ -398,29 +696,32 @@ object ExcelParser {
         return HeaderIndices(
             jointNo, lineNo, spoolNo, drawingNo, welderId, welderName,
             wpsNo, process, weldType, material, diameter, thickness,
-            weldDate, fitup, visual, ndtType, ndtResult, ndtReport, status, notes
+            weldDate, fitup, visual, ndtType, ndtResult, ndtReport, status, notes,
+            part1, part2, heatNo1, heatNo2, singleHeatNo
         )
     }
 
     private fun buildWeldFromRow(
         row: List<String>,
         h: HeaderIndices,
+        effectiveLine: String,
+        effectiveSpool: String,
+        effectiveJoint: String,
+        lastValidDrawing: String,
+        lastValidWps: String,
+        lastValidMat: String,
         fallbackIndex: Int
     ): WeldJoint {
         fun get(idx: Int, default: String = ""): String =
-            if (idx in row.indices) row[idx].trim() else default
+            if (idx in row.indices && row[idx].trim().isNotBlank()) row[idx].trim() else default
 
-        val rawJoint = get(h.jointNo, "W-$fallbackIndex")
-        val jointNo = if (rawJoint.isNotBlank()) rawJoint else "W-$fallbackIndex"
-        val lineNo = get(h.lineNo, "LINE-01")
-        val spoolNo = get(h.spoolNo, "SP-01")
-        val drawingNo = get(h.drawingNo, "DWG-01")
+        val drawingNo = get(h.drawingNo, lastValidDrawing)
         val welderId = get(h.welderId, "W-01")
         val welderName = get(h.welderName, "Welder $welderId")
-        val wpsNo = get(h.wpsNo, "WPS-CS-01")
+        val wpsNo = get(h.wpsNo, if (lastValidWps.isNotBlank()) lastValidWps else "WPS-01")
         val process = get(h.process, "GTAW+SMAW")
         val weldType = get(h.weldType, "BW")
-        val material = get(h.material, "A106 Gr.B")
+        val material = get(h.material, if (lastValidMat.isNotBlank()) lastValidMat else "A106 Gr.B")
 
         val diaStr = get(h.diameter, "4.0").replace(",", ".").replace("\"", "").replace("DN", "").trim()
         val diameter = diaStr.toDoubleOrNull() ?: 4.0
@@ -428,22 +729,22 @@ object ExcelParser {
         val thickStr = get(h.thickness, "6.0").replace(",", ".").replace("mm", "").trim()
         val thickness = thickStr.toDoubleOrNull() ?: 6.0
 
-        val rawDate = get(h.weldDate, "2026-09-20")
-        val weldDate = parseExcelDate(rawDate)
+        val rawDate = get(h.weldDate, "")
+        val weldDate = if (rawDate.isNotBlank()) parseExcelDate(rawDate) else SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 
         // Parse Inspection statuses
-        val rawFitup = get(h.fitup, "ACCEPTED").uppercase()
+        val rawFitup = get(h.fitup, "").uppercase()
         val fitupStatus = when {
             rawFitup.contains("ACC") || rawFitup.contains("CONF") || rawFitup.contains("OK") || rawFitup == "A" || rawFitup.contains("VAL") -> "ACCEPTED"
             rawFitup.contains("REJ") || rawFitup.contains("REF") || rawFitup.contains("NON") -> "REJECTED"
-            else -> "PENDING"
+            else -> "ACCEPTED"
         }
 
-        val rawVisual = get(h.visual, "ACCEPTED").uppercase()
+        val rawVisual = get(h.visual, "").uppercase()
         val visualStatus = when {
             rawVisual.contains("ACC") || rawVisual.contains("CONF") || rawVisual.contains("OK") || rawVisual == "A" || rawVisual.contains("VAL") -> "ACCEPTED"
             rawVisual.contains("REJ") || rawVisual.contains("REF") || rawVisual.contains("NON") -> "REJECTED"
-            else -> "PENDING"
+            else -> "ACCEPTED"
         }
 
         val rawNdtType = get(h.ndtType, "RT").uppercase()
@@ -455,13 +756,13 @@ object ExcelParser {
             else -> "RT"
         }
 
-        val rawNdtRes = get(h.ndtResult, "ACCEPTED").uppercase()
+        val rawNdtRes = get(h.ndtResult, "").uppercase()
         val ndtResult = when {
             rawNdtRes.contains("ACC") || rawNdtRes.contains("CONF") || rawNdtRes.contains("OK") || rawNdtRes == "A" || rawNdtRes.contains("VAL") -> "ACCEPTED"
             rawNdtRes.contains("REJ") || rawNdtRes.contains("REP") || rawNdtRes.contains("NON") -> "REJECTED"
             rawNdtRes.contains("REQ") || rawNdtRes.contains("ATT") || rawNdtRes.contains("PEND") -> "PENDING"
             rawNdtRes.contains("NOT") || rawNdtRes.contains("N/A") || ndtType == "VT ONLY" -> "NOT_REQUIRED"
-            else -> "PENDING"
+            else -> if (get(h.ndtReport, "").isNotBlank()) "ACCEPTED" else "PENDING"
         }
 
         val ndtReportNo = get(h.ndtReport, "")
@@ -469,19 +770,43 @@ object ExcelParser {
         val rawStatus = get(h.status, "").uppercase()
         val status = when {
             rawStatus.contains("REP") || ndtResult == "REJECTED" || visualStatus == "REJECTED" -> "REPAIR_REQUIRED"
+            rawStatus.contains("COMP") || rawStatus.contains("TERM") || rawStatus.contains("CONF") -> "COMPLETED"
+            rawStatus.contains("PROG") || rawStatus.contains("EN COURS") -> "IN_PROGRESS"
             visualStatus == "PENDING" || fitupStatus == "PENDING" -> "IN_PROGRESS"
             ndtResult == "PENDING" -> "PENDING_NDT"
-            rawStatus.contains("COMP") || rawStatus.contains("TERM") || rawStatus.contains("CONF") -> "COMPLETED"
             else -> "COMPLETED"
         }
 
         val notes = get(h.notes, "")
 
+        // Parts / Composants
+        val part1 = get(h.part1, "")
+        val part2 = get(h.part2, "")
+
+        // Heat Numbers / N° de Coulée
+        var heatNo1 = get(h.heatNo1, "")
+        var heatNo2 = get(h.heatNo2, "")
+
+        if (heatNo1.isBlank() && heatNo2.isBlank() && h.singleHeatNo != -1) {
+            val rawHeat = get(h.singleHeatNo, "")
+            if (rawHeat.isNotBlank()) {
+                val parts = when {
+                    rawHeat.contains("/") -> rawHeat.split("/")
+                    rawHeat.contains("+") -> rawHeat.split("+")
+                    rawHeat.contains(" - ") -> rawHeat.split(" - ")
+                    rawHeat.contains(",") -> rawHeat.split(",")
+                    else -> listOf(rawHeat)
+                }
+                heatNo1 = parts.getOrNull(0)?.trim() ?: ""
+                heatNo2 = parts.getOrNull(1)?.trim() ?: ""
+            }
+        }
+
         return WeldJoint(
             id = 0,
-            jointNo = jointNo,
-            lineNo = lineNo,
-            spoolNo = spoolNo,
+            jointNo = effectiveJoint,
+            lineNo = effectiveLine,
+            spoolNo = effectiveSpool,
             drawingNo = drawingNo,
             welderId = welderId,
             welderName = welderName,
@@ -503,6 +828,10 @@ object ExcelParser {
             ndtReportNo = ndtReportNo,
             ndtDate = weldDate,
             repairCount = if (status == "REPAIR_REQUIRED") 1 else 0,
+            part1 = part1,
+            part2 = part2,
+            heatNo1 = heatNo1,
+            heatNo2 = heatNo2,
             status = status,
             notes = notes,
             updatedAt = System.currentTimeMillis()
@@ -520,7 +849,7 @@ object ExcelParser {
 
     fun exportToCsv(welds: List<WeldJoint>): String {
         val sb = StringBuilder()
-        sb.append("Joint No,Line No,Spool No,Drawing No,Welder ID,Welder Name,WPS,Process,Weld Type,Material,Diameter (Inch),Thickness (mm),Weld Date,Fit-up,Visual VT,NDT Type,NDT Result,NDT Report,Overall Status,Notes\n")
+        sb.append("Joint No,Line No,Spool No,Drawing No,Part 1,Heat No 1,Part 2,Heat No 2,Welder ID,Welder Name,WPS,Process,Weld Type,Material,Diameter (Inch),Thickness (mm),Weld Date,Fit-up,Visual VT,NDT Type,NDT Result,NDT Report,Overall Status,Notes\n")
 
         for (w in welds) {
             val row = listOf(
@@ -528,6 +857,10 @@ object ExcelParser {
                 escapeCsv(w.lineNo),
                 escapeCsv(w.spoolNo),
                 escapeCsv(w.drawingNo),
+                escapeCsv(w.part1),
+                escapeCsv(w.heatNo1),
+                escapeCsv(w.part2),
+                escapeCsv(w.heatNo2),
                 escapeCsv(w.welderId),
                 escapeCsv(w.welderName),
                 escapeCsv(w.wpsNo),

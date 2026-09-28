@@ -1,6 +1,6 @@
 {
-  "name": "WeldTrack DB",
-  "description": "Welding Database & Quality Inspection Dashboard with Excel / Google Sheets sync",
+  "name": "WeldTrack Light",
+  "description": "WDB Light v2.0 - Recherche isométrie, filtrage des soudures et détection des doublons WDB",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

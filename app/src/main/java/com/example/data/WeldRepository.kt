@@ -14,6 +14,33 @@ class WeldRepository(
     private val context: Context
 ) {
     val allWelds: Flow<List<WeldJoint>> = weldJointDao.getAllWelds()
+    val duplicateWelds: Flow<List<WeldJoint>> = weldJointDao.getDuplicateWelds()
+    val duplicateCount: Flow<Int> = weldJointDao.getDuplicateCount()
+
+    fun getDistinctLines(): Flow<List<String>> = weldJointDao.getDistinctLines()
+    fun getDistinctSpools(lineNo: String): Flow<List<String>> = weldJointDao.getDistinctSpools(lineNo)
+    fun getWeldsByIsometric(lineNo: String): Flow<List<WeldJoint>> = weldJointDao.getWeldsByIsometric(lineNo)
+    fun getWeldsByIsometricAndSpool(lineNo: String, spoolNo: String): Flow<List<WeldJoint>> = weldJointDao.getWeldsByIsometricAndSpool(lineNo, spoolNo)
+
+    fun filterWelds(
+        lineNo: String? = null,
+        spoolNo: String? = null,
+        status: String? = null,
+        welderId: String? = null
+    ): Flow<List<WeldJoint>> = weldJointDao.filterWelds(lineNo, spoolNo, status, welderId)
+
+    suspend fun getDuplicateWeldsSnapshot(): List<WeldJoint> = withContext(Dispatchers.IO) {
+        weldJointDao.getDuplicateWeldsSnapshot()
+    }
+
+    suspend fun findDuplicates(
+        lineNo: String,
+        spoolNo: String,
+        jointNo: String,
+        excludeId: Long = 0
+    ): List<WeldJoint> = withContext(Dispatchers.IO) {
+        weldJointDao.findDuplicates(lineNo, spoolNo, jointNo, excludeId)
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -87,6 +114,32 @@ class WeldRepository(
                 url = url.replace("dl=0", "dl=1")
             }
 
+            // Convert Microsoft OneDrive / SharePoint sharing links into direct file downloads
+            // Example 1: https://1drv.ms/u/... or https://1drv.ms/x/... -> append download=1
+            if (url.contains("1drv.ms")) {
+                if (!url.contains("download=1")) {
+                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
+                }
+            }
+            // Example 2: onedrive.live.com view link -> convert view.aspx to download.aspx
+            if (url.contains("onedrive.live.com")) {
+                if (url.contains("view.aspx")) {
+                    url = url.replace("view.aspx", "download.aspx")
+                }
+                if (!url.contains("download=1")) {
+                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
+                }
+            }
+            // Example 3: SharePoint / OneDrive for Business links
+            if (url.contains("sharepoint.com")) {
+                if (url.contains("web=1")) {
+                    url = url.replace("web=1", "download=1")
+                }
+                if (!url.contains("download=1")) {
+                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
+                }
+            }
+
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "WeldTrack-Android/1.0")
@@ -95,12 +148,35 @@ class WeldRepository(
 
             val response = httpClient.newCall(request).execute()
             if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("HTTP error ${response.code}: ${response.message}"))
+                if (response.code == 401 || response.code == 403) {
+                    return@withContext Result.failure(
+                        Exception(
+                            "Accès SharePoint SARPI-DZ protégé (Erreur ${response.code} Interdit).\n\n" +
+                            "Ce fichier est sécurisé par le compte Microsoft 365 de votre entreprise et bloque les téléchargements anonymes sans session connectée.\n\n" +
+                            "👉 Solution simple : Utilisez le bouton « Importer directement le fichier XLSX » juste ci-dessous pour charger votre fichier sauvegardé."
+                        )
+                    )
+                }
+                return@withContext Result.failure(Exception("Erreur serveur HTTP ${response.code}: ${response.message}"))
             }
 
-            val responseBody = response.body ?: return@withContext Result.failure(Exception("Empty server response"))
+            val responseBody = response.body ?: return@withContext Result.failure(Exception("Réponse serveur vide"))
             val bytes = responseBody.bytes()
+            val contentType = response.header("Content-Type") ?: ""
             val filename = response.header("Content-Disposition") ?: url
+
+            // Check if response is an HTML page (like a login or redirection page)
+            val isHtml = contentType.contains("text/html", ignoreCase = true) ||
+                    (bytes.size > 20 && String(bytes.take(20).toByteArray()).lowercase().let { it.contains("<html") || it.contains("<!doc") })
+
+            if (isHtml) {
+                return@withContext Result.failure(
+                    Exception(
+                        "Le lien SharePoint a retourné une page de connexion Microsoft au lieu du fichier Excel.\n\n" +
+                        "👉 Solution simple : Utilisez le bouton « Importer directement le fichier XLSX » pour charger votre fichier."
+                    )
+                )
+            }
 
             val parsedWelds = if (filename.contains(".xlsx", ignoreCase = true) || (bytes.size > 4 && bytes[0] == 0x50.toByte())) {
                 ExcelParser.parseXlsxBytes(bytes)
@@ -109,7 +185,12 @@ class WeldRepository(
             }
 
             if (parsedWelds.isEmpty()) {
-                return@withContext Result.failure(Exception("Aucune donnée de soudure détectée dans le fichier"))
+                return@withContext Result.failure(
+                    Exception(
+                        "Aucune donnée de soudure détectée dans le fichier.\n\n" +
+                        "Vérifiez que le fichier contient bien les colonnes de soudage (Ligne, Spool, Joint) ou importez votre fichier « Welding Data Base01.xlsx » en local."
+                    )
+                )
             }
 
             if (replaceExisting) {
@@ -251,6 +332,10 @@ class WeldRepository(
                 diameterInch = 8.0,
                 thicknessMm = 8.18,
                 weldDate = "2026-09-18",
+                part1 = "Tuyau 8\" Sch 40",
+                heatNo1 = "HT-48291",
+                part2 = "Coude 90° LR 8\"",
+                heatNo2 = "HT-93021",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-17",
@@ -278,6 +363,10 @@ class WeldRepository(
                 diameterInch = 8.0,
                 thicknessMm = 8.18,
                 weldDate = "2026-09-19",
+                part1 = "Coude 90° LR 8\"",
+                heatNo1 = "HT-93021",
+                part2 = "Bride 8\" WN 150#",
+                heatNo2 = "HT-18492",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-18",
@@ -305,6 +394,10 @@ class WeldRepository(
                 diameterInch = 6.0,
                 thicknessMm = 7.11,
                 weldDate = "2026-09-22",
+                part1 = "Tuyau 6\" Sch 40",
+                heatNo1 = "HT-60211",
+                part2 = "Té Égal 6\"",
+                heatNo2 = "HT-77190",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-21",
@@ -331,6 +424,10 @@ class WeldRepository(
                 diameterInch = 6.0,
                 thicknessMm = 7.11,
                 weldDate = "2026-09-23",
+                part1 = "Té Égal 6\"",
+                heatNo1 = "HT-77190",
+                part2 = "Bride 6\" WN 150#",
+                heatNo2 = "HT-39014",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-22",
@@ -358,6 +455,10 @@ class WeldRepository(
                 diameterInch = 4.0,
                 thicknessMm = 6.02,
                 weldDate = "2026-09-20",
+                part1 = "Tuyau 4\" Sch 40S",
+                heatNo1 = "SS-4819A",
+                part2 = "Coude 90° 4\" 316L",
+                heatNo2 = "SS-3301B",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-19",
@@ -385,6 +486,10 @@ class WeldRepository(
                 diameterInch = 4.0,
                 thicknessMm = 6.02,
                 weldDate = "2026-09-21",
+                part1 = "Coude 90° 4\" 316L",
+                heatNo1 = "SS-3301B",
+                part2 = "Bride 4\" WN 300# 316L",
+                heatNo2 = "SS-5920C",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-20",
@@ -412,6 +517,10 @@ class WeldRepository(
                 diameterInch = 3.0,
                 thicknessMm = 5.49,
                 weldDate = "2026-09-24",
+                part1 = "Tuyau 3\" Sch 40S",
+                heatNo1 = "SS-7102D",
+                part2 = "Réduction Conc. 4x3\"",
+                heatNo2 = "SS-8819E",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-23",
@@ -438,6 +547,10 @@ class WeldRepository(
                 diameterInch = 2.0,
                 thicknessMm = 3.91,
                 weldDate = "2026-09-25",
+                part1 = "Tuyau 2\" Sch 40S",
+                heatNo1 = "SS-9104F",
+                part2 = "Bride Slip-On 2\" 300#",
+                heatNo2 = "SS-1182G",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-24",
@@ -464,6 +577,10 @@ class WeldRepository(
                 diameterInch = 12.0,
                 thicknessMm = 17.48,
                 weldDate = "2026-09-17",
+                part1 = "Tuyau 12\" Sch 80 LTCS",
+                heatNo1 = "A333-8821",
+                part2 = "Coude 90° 12\" Sch 80",
+                heatNo2 = "A333-9114",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-16",
@@ -491,6 +608,10 @@ class WeldRepository(
                 diameterInch = 12.0,
                 thicknessMm = 17.48,
                 weldDate = "2026-09-18",
+                part1 = "Coude 90° 12\" Sch 80",
+                heatNo1 = "A333-9114",
+                part2 = "Bride 12\" WN 600#",
+                heatNo2 = "A350-4402",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-17",
@@ -518,6 +639,10 @@ class WeldRepository(
                 diameterInch = 10.0,
                 thicknessMm = 15.09,
                 weldDate = "2026-09-24",
+                part1 = "Tuyau 10\" Sch 80",
+                heatNo1 = "A333-3199",
+                part2 = "Té 12x10\" Réduit",
+                heatNo2 = "A333-5582",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-23",
@@ -543,6 +668,10 @@ class WeldRepository(
                 diameterInch = 6.0,
                 thicknessMm = 7.11,
                 weldDate = "2026-09-22",
+                part1 = "Tuyau 6\" Duplex 2205",
+                heatNo1 = "DPX-8831",
+                part2 = "Coude 90° 6\" Duplex",
+                heatNo2 = "DPX-9942",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-21",
@@ -570,6 +699,10 @@ class WeldRepository(
                 diameterInch = 6.0,
                 thicknessMm = 7.11,
                 weldDate = "2026-09-23",
+                part1 = "Coude 90° 6\" Duplex",
+                heatNo1 = "DPX-9942",
+                part2 = "Bride 6\" WN Duplex",
+                heatNo2 = "DPX-1033",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-M. Robert",
                 fitupDate = "2026-09-22",
@@ -597,6 +730,10 @@ class WeldRepository(
                 diameterInch = 1.5,
                 thicknessMm = 3.68,
                 weldDate = "2026-09-25",
+                part1 = "Tuyau 1.5\" Sch 80",
+                heatNo1 = "HT-1194",
+                part2 = "Manchon SW 3000#",
+                heatNo2 = "HT-7721",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-24",
@@ -624,6 +761,10 @@ class WeldRepository(
                 diameterInch = 1.0,
                 thicknessMm = 3.38,
                 weldDate = "2026-09-26",
+                part1 = "Tuyau 1\" Sch 80",
+                heatNo1 = "HT-8812",
+                part2 = "Vanne à boisseau SW",
+                heatNo2 = "VALV-4401",
                 fitupStatus = "ACCEPTED",
                 fitupInspector = "QC-L. Blanc",
                 fitupDate = "2026-09-25",
@@ -651,6 +792,10 @@ class WeldRepository(
                 diameterInch = 8.0,
                 thicknessMm = 8.18,
                 weldDate = "2026-09-26",
+                part1 = "Tuyau 8\" Sch 40",
+                heatNo1 = "HT-48291",
+                part2 = "Té 8\" Égal",
+                heatNo2 = "HT-9930",
                 fitupStatus = "PENDING",
                 fitupInspector = "",
                 fitupDate = "",

@@ -6,21 +6,28 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.AppMode
 import com.example.data.ConnectionTestResult
+import com.example.data.DuplicateWeldGroup
 import com.example.data.IsometricGroup
 import com.example.data.LineProgress
 import com.example.data.NdtTypeStat
 import com.example.data.PcConnectionProfile
 import com.example.data.SpoolGroup
+import com.example.data.TransferMode
+import com.example.data.WdbProjectInfo
 import com.example.data.WelderPerformance
 import com.example.data.WeldingKpis
 import com.example.data.WeldJoint
 import com.example.data.WeldRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -80,35 +87,84 @@ class WeldViewModel(
     private val _lastSyncTimestamp = MutableStateFlow<Long?>(null)
     val lastSyncTimestamp: StateFlow<Long?> = _lastSyncTimestamp.asStateFlow()
 
+    private val _appMode = MutableStateFlow(AppMode.CLIENT_LITE)
+    val appMode: StateFlow<AppMode> = _appMode.asStateFlow()
+
     private val _connectionTestResult = MutableStateFlow<ConnectionTestResult?>(null)
     val connectionTestResult: StateFlow<ConnectionTestResult?> = _connectionTestResult.asStateFlow()
 
     private val _isTestingConnection = MutableStateFlow(false)
     val isTestingConnection: StateFlow<Boolean> = _isTestingConnection.asStateFlow()
 
+    private val _wdbProjectInfo = MutableStateFlow(
+        WdbProjectInfo(
+            folderPath = "X:\\7-NDT\\9-SUIVI DE CONTROLE ET NDT PROJET LAB\\WCP",
+            fileName = "Welding Data Base01.xlsx",
+            transferMode = TransferMode.CLOUD_WEB,
+            oneDriveUrl = "https://sarpidz-my.sharepoint.com/:x:/r/personal/abdenor_nasri_sarpi-dz_com/Documents/Welding%20Data%20Base01.xlsx?d=w5ec75b1ea7ca4f6d9b6122e0072b8330&csf=1&web=1&e=5dSkgj"
+        )
+    )
+    val wdbProjectInfo: StateFlow<WdbProjectInfo> = _wdbProjectInfo.asStateFlow()
+
+    private val _showModeSelectorDialog = MutableStateFlow(false)
+    val showModeSelectorDialog: StateFlow<Boolean> = _showModeSelectorDialog.asStateFlow()
+
+    // Detect duplicate welds in database (same line + spool + jointNo or same line + jointNo)
+    val duplicateGroups: StateFlow<List<DuplicateWeldGroup>> = allWelds.map { welds ->
+        welds.groupBy { w ->
+            val l = w.lineNo.trim().uppercase()
+            val s = w.spoolNo.trim().uppercase()
+            val j = w.jointNo.trim().uppercase()
+            "$l|$s|$j"
+        }.filter { it.value.size > 1 }
+        .map { (key, group) ->
+            val first = group.first()
+            DuplicateWeldGroup(
+                key = key,
+                lineNo = first.lineNo,
+                spoolNo = first.spoolNo,
+                jointNo = first.jointNo,
+                count = group.size,
+                welds = group
+            )
+        }
+    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptyList())
+
+    val duplicateIds: StateFlow<Set<Long>> = duplicateGroups.map { groups ->
+        groups.flatMap { it.welds }.map { it.id }.toSet()
+    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptySet())
+
+    val duplicateCount: StateFlow<Int> = duplicateGroups.map { groups ->
+        groups.sumOf { it.count }
+    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = 0)
+
     private val _savedPcProfiles = MutableStateFlow<List<PcConnectionProfile>>(
         listOf(
-            PcConnectionProfile("1", "PC Bureau (Local Wi-Fi)", "192.168.1.50", "8080", "ISO_WDB_0002.xlsx"),
-            PcConnectionProfile("2", "PC Chantier (LAN)", "10.0.0.15", "8000", "ISO_WDB_0002.xlsx"),
-            PcConnectionProfile("3", "Accès Internet Public (Ngrok / Cloud)", "mon-pc-wdb.ngrok-free.app", "80", "ISO_WDB_0002.xlsx")
+            PcConnectionProfile("1", "Projet LAB (WCP Local)", "192.168.1.50", "8080", "Welding Data Base01.xlsx"),
+            PcConnectionProfile("2", "PC Chantier (WCP LAN)", "10.0.0.15", "8000", "Welding Data Base01.xlsx"),
+            PcConnectionProfile("3", "Accès Distant (Ngrok / Cloud)", "mon-pc-lab.ngrok-free.app", "80", "Welding Data Base01.xlsx")
         )
     )
     val savedPcProfiles: StateFlow<List<PcConnectionProfile>> = _savedPcProfiles.asStateFlow()
 
     // Available spools dynamically filtered by selected line
     val availableSpools: StateFlow<List<String>> = combine(allWelds, lineFilter) { welds, line ->
-        val filtered = if (line == "ALL") welds else welds.filter { it.lineNo == line }
-        listOf("ALL") + filtered.map { it.spoolNo }.filter { it.isNotBlank() }.distinct().sorted()
-    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = listOf("ALL"))
+        val filtered = if (line == "ALL") welds else welds.filter { it.lineNo.equals(line, ignoreCase = true) }
+        val hasBlank = filtered.any { it.spoolNo.isBlank() }
+        val spools = filtered.map { it.spoolNo.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+        listOf("ALL") + (if (hasBlank && spools.isNotEmpty()) listOf("SANS SPOOL") else emptyList()) + spools
+    }.flowOn(Dispatchers.Default)
+    .stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = listOf("ALL"))
 
     // Available joints dynamically filtered by selected line and spool
     val availableJoints: StateFlow<List<String>> = combine(allWelds, lineFilter, spoolFilter) { welds, line, spool ->
         val filtered = welds.filter { w ->
-            (line == "ALL" || w.lineNo == line) &&
-            (spool == "ALL" || w.spoolNo == spool)
+            (line == "ALL" || w.lineNo.equals(line, ignoreCase = true)) &&
+            (spool == "ALL" || (spool == "SANS SPOOL" && w.spoolNo.isBlank()) || w.spoolNo.equals(spool, ignoreCase = true))
         }
-        listOf("ALL") + filtered.map { it.jointNo }.filter { it.isNotBlank() }.distinct().sorted()
-    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = listOf("ALL"))
+        listOf("ALL") + filtered.map { it.jointNo.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+    }.flowOn(Dispatchers.Default)
+    .stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = listOf("ALL"))
 
     // Hierarchical Tree View: Isometric Lines -> Spools -> Welded Joints
     val isometricTree: StateFlow<List<IsometricGroup>> = combine(
@@ -164,16 +220,18 @@ class WeldViewModel(
                     spools = spools
                 )
             }.sortedBy { it.lineNo }
-    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptyList())
+    }.flowOn(Dispatchers.Default)
+    .stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptyList())
 
-    // Filtered welds based on search & active hierarchical filters (Isométrie -> Spool -> Joint)
+    // Filtered welds based on search & active hierarchical filters (Isométrie -> Spool -> Joint + Doublons)
     val filteredWelds: StateFlow<List<WeldJoint>> = combine(
         allWelds,
         searchQuery,
         statusFilter,
         lineFilter,
         spoolFilter,
-        jointFilter
+        jointFilter,
+        duplicateIds
     ) { args: Array<Any> ->
         @Suppress("UNCHECKED_CAST")
         val welds = args[0] as List<WeldJoint>
@@ -182,6 +240,8 @@ class WeldViewModel(
         val line = args[3] as String
         val spool = args[4] as String
         val joint = args[5] as String
+        @Suppress("UNCHECKED_CAST")
+        val dupIds = args[6] as Set<Long>
 
         welds.filter { w ->
             val matchesQuery = query.isBlank() ||
@@ -192,6 +252,8 @@ class WeldViewModel(
                     w.welderName.contains(query, ignoreCase = true) ||
                     w.wpsNo.contains(query, ignoreCase = true) ||
                     w.material.contains(query, ignoreCase = true) ||
+                    w.drawingNo.contains(query, ignoreCase = true) ||
+                    w.notes.contains(query, ignoreCase = true) ||
                     w.ndtReportNo.contains(query, ignoreCase = true)
 
             val matchesStatus = when (status) {
@@ -200,16 +262,18 @@ class WeldViewModel(
                 "IN_PROGRESS" -> w.status == "IN_PROGRESS"
                 "PENDING_NDT" -> w.isPendingNdt
                 "REPAIR_REQUIRED" -> w.isRepairRequired
+                "DUPLICATES" -> dupIds.contains(w.id)
                 else -> true
             }
 
-            val matchesLine = line == "ALL" || w.lineNo.equals(line, ignoreCase = true)
-            val matchesSpool = spool == "ALL" || w.spoolNo.equals(spool, ignoreCase = true)
+            val matchesLine = line == "ALL" || (line == "SANS LIGNE" && w.lineNo.isBlank()) || w.lineNo.equals(line, ignoreCase = true)
+            val matchesSpool = spool == "ALL" || (spool == "SANS SPOOL" && w.spoolNo.isBlank()) || w.spoolNo.equals(spool, ignoreCase = true)
             val matchesJoint = joint == "ALL" || w.jointNo.equals(joint, ignoreCase = true)
 
             matchesQuery && matchesStatus && matchesLine && matchesSpool && matchesJoint
         }
-    }.stateIn(
+    }.flowOn(Dispatchers.Default)
+    .stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
@@ -359,10 +423,55 @@ class WeldViewModel(
         _connectionTestResult.value = null
     }
 
+    fun setTransferMode(mode: TransferMode) {
+        _wdbProjectInfo.value = _wdbProjectInfo.value.copy(transferMode = mode)
+    }
+
+    fun updateWdbConfig(folderPath: String, fileName: String) {
+        val cleanPath = folderPath.trim()
+        val cleanName = fileName.trim().ifBlank { "Welding Data Base01.xlsx" }
+        _wdbProjectInfo.value = _wdbProjectInfo.value.copy(
+            folderPath = cleanPath,
+            fileName = cleanName
+        )
+    }
+
+    fun setAppMode(mode: AppMode) {
+        _appMode.value = mode
+    }
+
+    fun toggleAppMode() {
+        _appMode.value = if (_appMode.value == AppMode.CLIENT_LITE) AppMode.MASTER else AppMode.CLIENT_LITE
+    }
+
+    fun removeDuplicateWelds() {
+        viewModelScope.launch {
+            val groups = duplicateGroups.value
+            val toDelete = mutableListOf<WeldJoint>()
+            for (g in groups) {
+                if (g.welds.size > 1) {
+                    toDelete.addAll(g.welds.drop(1))
+                }
+            }
+            if (toDelete.isNotEmpty()) {
+                for (w in toDelete) {
+                    repository.deleteWeld(w)
+                }
+                _syncState.value = SyncUiState.Success("${toDelete.size} doublon(s) nettoyé(s) avec succès dans la base WDB.", toDelete.size)
+            } else {
+                _syncState.value = SyncUiState.Success("Aucun doublon à supprimer dans la base.", 0)
+            }
+        }
+    }
+
+    fun setShowModeSelectorDialog(show: Boolean) {
+        _showModeSelectorDialog.value = show
+    }
+
     fun testPcConnection(
         ipAddress: String,
         port: String = "8080",
-        filePath: String = "ISO_WDB_0002.xlsx"
+        filePath: String = "Welding Data Base01.xlsx"
     ) {
         val cleanIp = ipAddress.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
         if (cleanIp.isBlank()) {
@@ -390,7 +499,7 @@ class WeldViewModel(
     fun syncFromPcIp(
         ipAddress: String,
         port: String = "8080",
-        filePath: String = "ISO_WDB_0002.xlsx",
+        filePath: String = "Welding Data Base01.xlsx",
         replaceExisting: Boolean = true
     ) {
         val cleanIp = ipAddress.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
@@ -414,7 +523,7 @@ class WeldViewModel(
                 onSuccess = { count ->
                     _lastSyncTimestamp.value = System.currentTimeMillis()
                     _syncState.value = SyncUiState.Success(
-                        "Connecté avec succès au PC ($cleanIp) ! $count soudures synchronisées depuis le fichier Excel.",
+                        "Connecté avec succès au PC ($cleanIp) ! $count soudures synchronisées depuis $cleanPath.",
                         count
                     )
                 },
@@ -422,6 +531,27 @@ class WeldViewModel(
                     _syncState.value = SyncUiState.Error(
                         "Impossible de joindre le PC sur $finalUrl : ${error.localizedMessage ?: "Vérifiez que le serveur ou partage sur le PC est actif et sur le même réseau Wi-Fi/Internet"}."
                     )
+                }
+            )
+        }
+    }
+
+    fun syncFromCloudOrOneDrive(url: String, replaceExisting: Boolean = true) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isBlank()) {
+            _syncState.value = SyncUiState.Error("Veuillez coller le lien de partage OneDrive, SharePoint ou Cloud de votre fichier Excel")
+            return
+        }
+        viewModelScope.launch {
+            _syncState.value = SyncUiState.Syncing
+            val result = repository.syncFromUrl(cleanUrl, replaceExisting)
+            result.fold(
+                onSuccess = { count ->
+                    _lastSyncTimestamp.value = System.currentTimeMillis()
+                    _syncState.value = SyncUiState.Success("Synchronisation OneDrive / Cloud réussie : $count soudures injectées dans la base !", count)
+                },
+                onFailure = { error ->
+                    _syncState.value = SyncUiState.Error("Erreur lors du téléchargement OneDrive / Cloud : ${error.localizedMessage ?: "Vérifiez que le lien est bien partagé pour tout utilisateur avec le lien."}")
                 }
             )
         }

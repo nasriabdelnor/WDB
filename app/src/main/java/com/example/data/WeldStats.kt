@@ -70,3 +70,32 @@ data class PcConnectionProfile(
     val filename: String
 )
 
+enum class TransferMode {
+    ASK,        // Demander à l'utilisateur
+    CABLE_USB,  // Transfert direct par câble USB / stockage local
+    CLOUD_WEB,  // Transfert par Internet (OneDrive, Google Drive, Plateforme)
+    PC_NETWORK  // Connexion directe réseau PC (Adresse IP / Wi-Fi)
+}
+
+enum class AppMode {
+    CLIENT_LITE, // Version Client très légère (dédiée terrain: filtre, recherche, détection de doublons, sans détails sensibles)
+    MASTER       // Version Master complète (Tableau de bord exhaustif, performance soudeurs, KPIs avancés)
+}
+
+data class DuplicateWeldGroup(
+    val key: String,
+    val lineNo: String,
+    val spoolNo: String,
+    val jointNo: String,
+    val count: Int,
+    val welds: List<WeldJoint>
+)
+
+
+data class WdbProjectInfo(
+    val folderPath: String = "X:\\7-NDT\\9-SUIVI DE CONTROLE ET NDT PROJET LAB\\WCP",
+    val fileName: String = "Welding Data Base01.xlsx",
+    val transferMode: TransferMode = TransferMode.CLOUD_WEB,
+    val oneDriveUrl: String = "https://sarpidz-my.sharepoint.com/:x:/r/personal/abdenor_nasri_sarpi-dz_com/Documents/Welding%20Data%20Base01.xlsx?d=w5ec75b1ea7ca4f6d9b6122e0072b8330&csf=1&web=1&e=5dSkgj"
+)
+
