@@ -11,42 +11,28 @@ import java.util.concurrent.TimeUnit
 
 class WeldRepository(
     private val weldJointDao: WeldJointDao,
+    private val isometricDao: IsometricDao,
+    private val spoolDao: SpoolDao,
     private val context: Context
 ) {
     val allWelds: Flow<List<WeldJoint>> = weldJointDao.getAllWelds()
+    val allIsometrics: Flow<List<Isometric>> = isometricDao.getAllIsometrics()
     val duplicateWelds: Flow<List<WeldJoint>> = weldJointDao.getDuplicateWelds()
     val duplicateCount: Flow<Int> = weldJointDao.getDuplicateCount()
+    val totalWeldsCount: Flow<Int> = weldJointDao.getCountFlow()
 
     fun getDistinctLines(): Flow<List<String>> = weldJointDao.getDistinctLines()
-    fun getDistinctSpools(lineNo: String): Flow<List<String>> = weldJointDao.getDistinctSpools(lineNo)
-    fun getWeldsByIsometric(lineNo: String): Flow<List<WeldJoint>> = weldJointDao.getWeldsByIsometric(lineNo)
-    fun getWeldsByIsometricAndSpool(lineNo: String, spoolNo: String): Flow<List<WeldJoint>> = weldJointDao.getWeldsByIsometricAndSpool(lineNo, spoolNo)
+    fun getDistinctSpools(isoNumber: String): Flow<List<String>> = weldJointDao.getDistinctSpools(isoNumber)
+    fun getWeldsByIsometric(isoNumber: String): Flow<List<WeldJoint>> = weldJointDao.getWeldsByIsometric(isoNumber)
+    fun getWeldsByIsometricAndSpool(isoNumber: String, spoolNumber: String): Flow<List<WeldJoint>> =
+        weldJointDao.getWeldsByIsometricAndSpool(isoNumber, spoolNumber)
 
     fun filterWelds(
-        lineNo: String? = null,
-        spoolNo: String? = null,
+        isoNumber: String? = null,
+        spoolNumber: String? = null,
         status: String? = null,
-        welderId: String? = null
-    ): Flow<List<WeldJoint>> = weldJointDao.filterWelds(lineNo, spoolNo, status, welderId)
-
-    suspend fun getDuplicateWeldsSnapshot(): List<WeldJoint> = withContext(Dispatchers.IO) {
-        weldJointDao.getDuplicateWeldsSnapshot()
-    }
-
-    suspend fun findDuplicates(
-        lineNo: String,
-        spoolNo: String,
-        jointNo: String,
-        excludeId: Long = 0
-    ): List<WeldJoint> = withContext(Dispatchers.IO) {
-        weldJointDao.findDuplicates(lineNo, spoolNo, jointNo, excludeId)
-    }
-
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+        welder: String? = null
+    ): Flow<List<WeldJoint>> = weldJointDao.filterWelds(isoNumber, spoolNumber, status, welder)
 
     fun searchWelds(query: String): Flow<List<WeldJoint>> {
         return if (query.isBlank()) {
@@ -54,6 +40,35 @@ class WeldRepository(
         } else {
             weldJointDao.searchWelds(query.trim())
         }
+    }
+
+    fun searchByHeatNumber(heatNumber: String): Flow<List<WeldJoint>> {
+        return if (heatNumber.isBlank()) {
+            weldJointDao.getAllWelds()
+        } else {
+            weldJointDao.searchByHeatNumber(heatNumber.trim())
+        }
+    }
+
+    fun searchByWelder(welder: String): Flow<List<WeldJoint>> {
+        return if (welder.isBlank()) {
+            weldJointDao.getAllWelds()
+        } else {
+            weldJointDao.searchByWelder(welder.trim())
+        }
+    }
+
+    suspend fun getDuplicateWeldsSnapshot(): List<WeldJoint> = withContext(Dispatchers.IO) {
+        weldJointDao.getDuplicateWeldsSnapshot()
+    }
+
+    suspend fun findDuplicates(
+        isoNumber: String,
+        spoolNumber: String,
+        jointNumber: String,
+        excludeId: Long = 0
+    ): List<WeldJoint> = withContext(Dispatchers.IO) {
+        weldJointDao.findDuplicates(isoNumber, spoolNumber, jointNumber, excludeId)
     }
 
     suspend fun insertWeld(weld: WeldJoint): Long = withContext(Dispatchers.IO) {
@@ -74,12 +89,305 @@ class WeldRepository(
 
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         weldJointDao.clearAllWelds()
+        isometricDao.clearAll()
+        spoolDao.clearAll()
+    }
+
+    suspend fun getCount(): Int = withContext(Dispatchers.IO) {
+        weldJointDao.getCount()
     }
 
     /**
-     * Download and parse an Excel / Google Sheets URL.
-     * Automatically converts Google Sheets edit URLs to direct CSV export format.
+     * Requirement: The application must start empty.
+     * No demo or placeholder data seeded.
      */
+    suspend fun checkAndSeedInitialData() = withContext(Dispatchers.IO) {
+        // Deliberately empty: Application starts empty per WDB v1.0 specification
+    }
+
+    /**
+     * Inspects a file from InputStream without committing to the database.
+     */
+    suspend fun inspectFromInputStream(
+        inputStream: InputStream,
+        filenameHint: String = "Welding Data Base01.xlsx",
+        sourceDescription: String = "Fichier local"
+    ): Result<ExcelInspectionResult> = withContext(Dispatchers.IO) {
+        try {
+            val result = ExcelParser.inspectAndParseStream(inputStream, filenameHint, sourceDescription)
+            if (result.parsedWelds.isEmpty()) {
+                Result.failure(Exception("Aucun joint de soudure détecté dans $filenameHint."))
+            } else {
+                Result.success(result)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Inspects a remote file from Google Drive, OneDrive, or HTTP URL without committing to the database.
+     */
+    suspend fun inspectFromUrl(
+        rawUrl: String,
+        sourceDescription: String = "Cloud / URL"
+    ): Result<ExcelInspectionResult> = withContext(Dispatchers.IO) {
+        try {
+            var url = rawUrl.trim()
+            if (url.isEmpty()) {
+                return@withContext Result.failure(IllegalArgumentException("L'URL ne peut pas être vide."))
+            }
+
+            if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
+                url = "https://$url"
+            }
+
+            // Google Drive / Google Sheets transformation
+            if (url.contains("drive.google.com/file/d/")) {
+                val fileId = url.substringAfter("file/d/").substringBefore("/")
+                url = "https://drive.google.com/uc?export=download&id=$fileId"
+            } else if (url.contains("docs.google.com/spreadsheets/d/")) {
+                val sheetId = url.substringAfter("spreadsheets/d/").substringBefore("/")
+                url = "https://docs.google.com/spreadsheets/d/$sheetId/export?format=xlsx"
+            }
+
+            // OneDrive / SharePoint download link adjustment
+            if (url.contains("sharepoint.com") || url.contains("1drv.ms")) {
+                if (!url.contains("download=1")) {
+                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
+                }
+            }
+
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0 (Android; Mobile) WDB-WeldingDataBase/1.0")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(Exception("Échec du téléchargement (${response.code} : ${response.message})"))
+            }
+
+            val body = response.body ?: return@withContext Result.failure(Exception("Fichier distant vide."))
+            val bytes = body.bytes()
+
+            // Check if Google returned an HTML auth/login page instead of real file
+            val isHtml = bytes.size > 10 && (
+                bytes.take(100).toByteArray().toString(Charsets.UTF_8).contains("<html", ignoreCase = true) ||
+                bytes.take(100).toByteArray().toString(Charsets.UTF_8).contains("<!doctype", ignoreCase = true) ||
+                bytes.take(200).toByteArray().toString(Charsets.UTF_8).contains("ServiceLogin", ignoreCase = true)
+            )
+            if (isHtml) {
+                return@withContext Result.failure(
+                    Exception("Le document Google Sheets nécessite une authentification ou un droit d'accès. Assurez-vous que le lien est configuré sur 'Tous les utilisateurs disposant du lien peuvent voir' ou importez directement le fichier XLSX.")
+                )
+            }
+
+            val filename = if (url.contains(".csv", ignoreCase = true)) "Welding Data Base01.csv" else "Welding Data Base01.xlsx"
+
+            val result = ExcelParser.inspectAndParseStream(bytes.inputStream(), filename, sourceDescription)
+            if (result.parsedWelds.isEmpty()) {
+                Result.failure(Exception("Le fichier téléchargé ne contient pas de données de soudage valides."))
+            } else {
+                Result.success(result)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Commits pre-inspected welds into the database (building isometrics and spools relational hierarchy).
+     */
+    suspend fun commitInspectedWelds(
+        parsedWelds: List<WeldJoint>,
+        replaceExisting: Boolean = true
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            if (parsedWelds.isEmpty()) {
+                return@withContext Result.failure(Exception("Liste de joints vide."))
+            }
+
+            if (replaceExisting) {
+                clearAll()
+            }
+
+            // Populate Isometrics, Spools and enriched Welds
+            val isoGroups = parsedWelds.groupBy { it.isoNumber.trim().ifBlank { "ISO-01" } }
+            val allEnrichedWelds = mutableListOf<WeldJoint>()
+
+            for ((isoNum, weldsInIso) in isoGroups) {
+                var iso = isometricDao.findByNumber(isoNum)
+                val isoId = if (iso != null) {
+                    iso.id
+                } else {
+                    isometricDao.insert(
+                        Isometric(
+                            isoNumber = isoNum,
+                            drawingNo = weldsInIso.firstOrNull { it.drawingNo.isNotBlank() }?.drawingNo ?: "",
+                            totalJoints = weldsInIso.size
+                        )
+                    )
+                }
+
+                val spoolGroups = weldsInIso.groupBy { it.spoolNumber.trim().ifBlank { "SP-01" } }
+                for ((spoolNum, weldsInSpool) in spoolGroups) {
+                    var spool = spoolDao.findSpool(isoNum, spoolNum)
+                    val spoolId = if (spool != null) {
+                        spool.id
+                    } else {
+                        spoolDao.insert(
+                            Spool(
+                                isoId = isoId,
+                                isoNumber = isoNum,
+                                spoolNumber = spoolNum,
+                                totalJoints = weldsInSpool.size
+                            )
+                        )
+                    }
+
+                    for (w in weldsInSpool) {
+                        allEnrichedWelds.add(
+                            w.copy(
+                                isoId = isoId,
+                                spoolId = spoolId,
+                                isoNumber = isoNum,
+                                spoolNumber = spoolNum
+                            )
+                        )
+                    }
+                }
+            }
+
+            weldJointDao.insertAll(allEnrichedWelds)
+            Result.success(parsedWelds.size)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Import Excel (XLSX, CSV, TSV) from an InputStream and rebuild relational tables.
+     */
+    suspend fun importFromInputStream(
+        inputStream: InputStream,
+        filenameHint: String = "Welding Data Base01.xlsx",
+        replaceExisting: Boolean = true
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        val inspectRes = inspectFromInputStream(inputStream, filenameHint)
+        inspectRes.fold(
+            onSuccess = { res -> commitInspectedWelds(res.parsedWelds, replaceExisting) },
+            onFailure = { err -> Result.failure(err) }
+        )
+    }
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .build()
+
+    companion object {
+        const val DEFAULT_GOOGLE_SHEET_URL =
+            "https://docs.google.com/spreadsheets/d/1d20rVFyyJT6a5MJIHpuLJtzNKJRTqm4s/edit"
+    }
+
+    /**
+     * Executes the full WDB synchronization workflow per prompt specifications:
+     * Google Sheet -> Download latest data -> Validate columns -> Update local WDB database -> Refresh ISO/SPOOL/JOINT
+     * Returns SyncSuccessSummary with real numbers only:
+     * File: WDB Google Sheet
+     * Records imported: XXXX
+     * ISO: XXXX
+     * SPOOL: XXXX
+     * JOINTS: XXXX
+     */
+    suspend fun syncWdbFromGoogleSheet(
+        sheetUrl: String = DEFAULT_GOOGLE_SHEET_URL
+    ): Result<SyncSuccessSummary> = withContext(Dispatchers.IO) {
+        try {
+            var url = sheetUrl.trim()
+            if (url.isEmpty()) url = DEFAULT_GOOGLE_SHEET_URL
+
+            val sheetId = when {
+                url.contains("spreadsheets/d/") -> url.substringAfter("spreadsheets/d/").substringBefore("/")
+                url.contains("file/d/") -> url.substringAfter("file/d/").substringBefore("/")
+                url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
+                else -> "1d20rVFyyJT6a5MJIHpuLJtzNKJRTqm4s"
+            }
+
+            // Attempt all candidate Google Sheets download endpoints
+            val candidateUrls = listOf(
+                "https://docs.google.com/spreadsheets/d/$sheetId/export?format=xlsx",
+                "https://docs.google.com/spreadsheets/d/$sheetId/export?format=csv",
+                "https://drive.google.com/uc?export=download&id=$sheetId",
+                "https://docs.google.com/spreadsheets/d/$sheetId/gviz/tq?tqx=out:csv"
+            )
+
+            var downloadedResult: ExcelInspectionResult? = null
+            var lastError: Exception? = null
+
+            for (candidate in candidateUrls) {
+                try {
+                    val inspectRes = inspectFromUrl(candidate, "WDB Google Sheet")
+                    if (inspectRes.isSuccess) {
+                        val res = inspectRes.getOrThrow()
+                        if (res.parsedWelds.isNotEmpty()) {
+                            downloadedResult = res
+                            break
+                        }
+                    } else {
+                        lastError = inspectRes.exceptionOrNull() as? Exception
+                    }
+                } catch (e: Exception) {
+                    lastError = e
+                }
+            }
+
+            if (downloadedResult == null || downloadedResult.parsedWelds.isEmpty()) {
+                val msg = lastError?.localizedMessage
+                    ?: "Impossible d'accéder au fichier Google Sheets. Veuillez vérifier que le lien est configuré sur 'Tous les utilisateurs disposant du lien peuvent voir' ou importer directement le fichier Excel."
+                return@withContext Result.failure(Exception(msg))
+            }
+
+            val finalInspection = downloadedResult
+
+            // Validate required columns
+            val requiredKeywords = listOf("ISO", "SPOOL", "JOINT")
+            val hasRequired = requiredKeywords.all { kw ->
+                finalInspection.detectedColumns.any { it.contains(kw, ignoreCase = true) }
+            }
+            if (!hasRequired) {
+                return@withContext Result.failure(Exception("Validation des colonnes échouée : Colonnes ISO / SPOOL / JOINT manquantes dans la feuille."))
+            }
+
+            // Update local WDB database (replaces empty database)
+            val commitRes = commitInspectedWelds(finalInspection.parsedWelds, replaceExisting = true)
+            if (commitRes.isFailure) {
+                return@withContext Result.failure(commitRes.exceptionOrNull() ?: Exception("Erreur d'insertion dans la base WDB."))
+            }
+
+            // Real counts from the spreadsheet only
+            val isos = finalInspection.parsedWelds.map { it.isoNumber.trim() }.filter { it.isNotBlank() }.distinct()
+            val spools = finalInspection.parsedWelds.map { "${it.isoNumber}|${it.spoolNumber}" }.distinct()
+            val totalJoints = finalInspection.parsedWelds.size
+
+            val summary = SyncSuccessSummary(
+                fileName = "WDB Google Sheet",
+                recordsImported = totalJoints,
+                isoCount = isos.size,
+                spoolCount = spools.size,
+                jointsCount = totalJoints
+            )
+
+            Result.success(summary)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Result.failure(e)
+        }
+    }
+
     suspend fun syncFromUrl(rawUrl: String, replaceExisting: Boolean = true): Result<Int> = withContext(Dispatchers.IO) {
         try {
             var url = rawUrl.trim()
@@ -87,726 +395,34 @@ class WeldRepository(
                 return@withContext Result.failure(IllegalArgumentException("URL cannot be empty"))
             }
 
-            // Normalize URL protocol
             if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
                 url = "http://$url"
             }
 
-            // Convert Google Drive sharing link into direct download link
-            // Example: https://drive.google.com/file/d/FILE_ID/view?usp=sharing -> https://drive.google.com/uc?export=download&id=FILE_ID
             if (url.contains("drive.google.com/file/d/")) {
                 val fileId = url.substringAfter("file/d/").substringBefore("/")
                 url = "https://drive.google.com/uc?export=download&id=$fileId"
             }
 
-            // Convert Google Sheets edit URL into direct CSV export URL
-            // Example: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit#gid=0 -> /export?format=csv
-            if (url.contains("docs.google.com/spreadsheets/d/")) {
-                val sheetId = url.substringAfter("spreadsheets/d/").substringBefore("/")
-                val gid = if (url.contains("gid=")) {
-                    url.substringAfter("gid=").substringBefore("&").substringBefore("#")
-                } else "0"
-                url = "https://docs.google.com/spreadsheets/d/$sheetId/export?format=csv&gid=$gid"
-            }
-
-            // Convert Dropbox preview link to direct download
-            if (url.contains("dropbox.com") && url.contains("dl=0")) {
-                url = url.replace("dl=0", "dl=1")
-            }
-
-            // Convert Microsoft OneDrive / SharePoint sharing links into direct file downloads
-            // Example 1: https://1drv.ms/u/... or https://1drv.ms/x/... -> append download=1
-            if (url.contains("1drv.ms")) {
-                if (!url.contains("download=1")) {
-                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
-                }
-            }
-            // Example 2: onedrive.live.com view link -> convert view.aspx to download.aspx
-            if (url.contains("onedrive.live.com")) {
-                if (url.contains("view.aspx")) {
-                    url = url.replace("view.aspx", "download.aspx")
-                }
-                if (!url.contains("download=1")) {
-                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
-                }
-            }
-            // Example 3: SharePoint / OneDrive for Business links
-            if (url.contains("sharepoint.com")) {
-                if (url.contains("web=1")) {
-                    url = url.replace("web=1", "download=1")
-                }
-                if (!url.contains("download=1")) {
-                    url = if (url.contains("?")) "$url&download=1" else "$url?download=1"
-                }
-            }
-
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "WeldTrack-Android/1.0")
-                .header("ngrok-skip-browser-warning", "true") // Bypass ngrok warning page for free tunnels
-                .build()
-
+            val request = Request.Builder().url(url).build()
             val response = httpClient.newCall(request).execute()
+
             if (!response.isSuccessful) {
-                if (response.code == 401 || response.code == 403) {
-                    return@withContext Result.failure(
-                        Exception(
-                            "Accès SharePoint SARPI-DZ protégé (Erreur ${response.code} Interdit).\n\n" +
-                            "Ce fichier est sécurisé par le compte Microsoft 365 de votre entreprise et bloque les téléchargements anonymes sans session connectée.\n\n" +
-                            "👉 Solution simple : Utilisez le bouton « Importer directement le fichier XLSX » juste ci-dessous pour charger votre fichier sauvegardé."
-                        )
-                    )
-                }
-                return@withContext Result.failure(Exception("Erreur serveur HTTP ${response.code}: ${response.message}"))
+                return@withContext Result.failure(Exception("Erreur HTTP ${response.code}: ${response.message}"))
             }
 
-            val responseBody = response.body ?: return@withContext Result.failure(Exception("Réponse serveur vide"))
-            val bytes = responseBody.bytes()
-            val contentType = response.header("Content-Type") ?: ""
-            val filename = response.header("Content-Disposition") ?: url
+            val body = response.body ?: return@withContext Result.failure(Exception("Réponse vide"))
+            val bytes = body.bytes()
+            val filename = if (url.contains(".csv")) "database.csv" else "Welding Data Base01.xlsx"
 
-            // Check if response is an HTML page (like a login or redirection page)
-            val isHtml = contentType.contains("text/html", ignoreCase = true) ||
-                    (bytes.size > 20 && String(bytes.take(20).toByteArray()).lowercase().let { it.contains("<html") || it.contains("<!doc") })
-
-            if (isHtml) {
-                return@withContext Result.failure(
-                    Exception(
-                        "Le lien SharePoint a retourné une page de connexion Microsoft au lieu du fichier Excel.\n\n" +
-                        "👉 Solution simple : Utilisez le bouton « Importer directement le fichier XLSX » pour charger votre fichier."
-                    )
-                )
-            }
-
-            val parsedWelds = if (filename.contains(".xlsx", ignoreCase = true) || (bytes.size > 4 && bytes[0] == 0x50.toByte())) {
-                ExcelParser.parseXlsxBytes(bytes)
-            } else {
-                ExcelParser.parseCsvOrTsv(bytes)
-            }
-
-            if (parsedWelds.isEmpty()) {
-                return@withContext Result.failure(
-                    Exception(
-                        "Aucune donnée de soudure détectée dans le fichier.\n\n" +
-                        "Vérifiez que le fichier contient bien les colonnes de soudage (Ligne, Spool, Joint) ou importez votre fichier « Welding Data Base01.xlsx » en local."
-                    )
-                )
-            }
-
-            if (replaceExisting) {
-                weldJointDao.clearAllWelds()
-            }
-            weldJointDao.insertAll(parsedWelds)
-
-            Result.success(parsedWelds.size)
+            importFromInputStream(bytes.inputStream(), filename, replaceExisting)
         } catch (e: Exception) {
-            e.printStackTrace()
             Result.failure(e)
         }
     }
 
-    /**
-     * Test connection to PC IP or cloud URL without updating the database.
-     */
-    suspend fun testConnection(rawUrl: String): ConnectionTestResult = withContext(Dispatchers.IO) {
-        val startTime = System.currentTimeMillis()
-        try {
-            var url = rawUrl.trim()
-            if (url.isEmpty()) {
-                return@withContext ConnectionTestResult(false, 0, 0, 0, "L'adresse IP ou URL est vide")
-            }
-            if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
-                url = "http://$url"
-            }
-
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "WeldTrack-Android/1.0")
-                .header("ngrok-skip-browser-warning", "true")
-                .head() // Try HEAD request first for fast ping
-                .build()
-
-            var response = try {
-                httpClient.newCall(request).execute()
-            } catch (e: Exception) {
-                // If HEAD fails or is not supported by Python simple HTTP server, fallback to GET
-                val getRequest = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "WeldTrack-Android/1.0")
-                    .header("ngrok-skip-browser-warning", "true")
-                    .build()
-                httpClient.newCall(getRequest).execute()
-            }
-
-            val elapsed = System.currentTimeMillis() - startTime
-            val code = response.code
-            val contentLength = response.body?.contentLength() ?: 0L
-            val sizeKb = if (contentLength > 0) contentLength / 1024 else 0L
-
-            if (response.isSuccessful) {
-                ConnectionTestResult(
-                    isSuccess = true,
-                    statusCode = code,
-                    responseTimeMs = elapsed,
-                    fileSizeKb = sizeKb,
-                    message = "Connexion réussie ($code OK, ${elapsed}ms) ! Fichier Excel accessible."
-                )
-            } else {
-                ConnectionTestResult(
-                    isSuccess = false,
-                    statusCode = code,
-                    responseTimeMs = elapsed,
-                    fileSizeKb = 0,
-                    message = "Erreur HTTP $code : ${response.message}. Vérifiez le chemin ou le port sur le PC."
-                )
-            }
-        } catch (e: Exception) {
-            val elapsed = System.currentTimeMillis() - startTime
-            ConnectionTestResult(
-                isSuccess = false,
-                statusCode = 0,
-                responseTimeMs = elapsed,
-                fileSizeKb = 0,
-                message = "Inaccessible (${e.localizedMessage ?: "Délai dépassé"}). Vérifiez que le PC est sur le même réseau ou connecté à Internet."
-            )
-        }
-    }
-
-    /**
-     * Import from local file input stream (from file picker)
-     */
-    suspend fun importFromStream(inputStream: InputStream, filename: String, replaceExisting: Boolean): Result<Int> = withContext(Dispatchers.IO) {
-        try {
-            val parsedWelds = ExcelParser.parseStream(inputStream, filename)
-            if (parsedWelds.isEmpty()) {
-                return@withContext Result.failure(Exception("Fichier vide ou format non reconnu"))
-            }
-            if (replaceExisting) {
-                weldJointDao.clearAllWelds()
-            }
-            weldJointDao.insertAll(parsedWelds)
-            Result.success(parsedWelds.size)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Export all welds in database into CSV format
-     */
-    suspend fun exportToCsv(): String = withContext(Dispatchers.IO) {
+    fun exportToCsv(): Flow<String> = kotlinx.coroutines.flow.flow {
         val welds = weldJointDao.getAllWeldsSnapshot()
-        ExcelParser.exportToCsv(welds)
-    }
-
-    /**
-     * Pre-populates the database with realistic industrial welding records if empty.
-     */
-    suspend fun checkAndSeedInitialData() = withContext(Dispatchers.IO) {
-        if (weldJointDao.getCount() == 0) {
-            val sampleData = generateRealisticSampleWelds()
-            weldJointDao.insertAll(sampleData)
-        }
-    }
-
-    suspend fun resetToSampleData() = withContext(Dispatchers.IO) {
-        weldJointDao.clearAllWelds()
-        val sampleData = generateRealisticSampleWelds()
-        weldJointDao.insertAll(sampleData)
-    }
-
-    private fun generateRealisticSampleWelds(): List<WeldJoint> {
-        return listOf(
-            WeldJoint(
-                jointNo = "W-001",
-                lineNo = "08-CS-150-01",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-PR-401",
-                welderId = "S-101",
-                welderName = "Marc Dupont",
-                wpsNo = "WPS-CS-01",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A106 Gr.B",
-                diameterInch = 8.0,
-                thicknessMm = 8.18,
-                weldDate = "2026-09-18",
-                part1 = "Tuyau 8\" Sch 40",
-                heatNo1 = "HT-48291",
-                part2 = "Coude 90° LR 8\"",
-                heatNo2 = "HT-93021",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-17",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-19",
-                ndtType = "RT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "RT-2026-042",
-                ndtDate = "2026-09-20",
-                status = "COMPLETED",
-                notes = "Passe de racine TIG 100% pénétrée, remplissage électrode 7018 conforme"
-            ),
-            WeldJoint(
-                jointNo = "W-002",
-                lineNo = "08-CS-150-01",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-PR-401",
-                welderId = "S-101",
-                welderName = "Marc Dupont",
-                wpsNo = "WPS-CS-01",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A106 Gr.B",
-                diameterInch = 8.0,
-                thicknessMm = 8.18,
-                weldDate = "2026-09-19",
-                part1 = "Coude 90° LR 8\"",
-                heatNo1 = "HT-93021",
-                part2 = "Bride 8\" WN 150#",
-                heatNo2 = "HT-18492",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-18",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-20",
-                ndtType = "RT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "RT-2026-045",
-                ndtDate = "2026-09-21",
-                status = "COMPLETED",
-                notes = "Aspect visuel régulier, surépaisseur 1.5mm"
-            ),
-            WeldJoint(
-                jointNo = "W-003",
-                lineNo = "08-CS-150-01",
-                spoolNo = "SP-02",
-                drawingNo = "ISO-PR-401",
-                welderId = "S-104",
-                welderName = "Ahmed Benali",
-                wpsNo = "WPS-CS-01",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A106 Gr.B",
-                diameterInch = 6.0,
-                thicknessMm = 7.11,
-                weldDate = "2026-09-22",
-                part1 = "Tuyau 6\" Sch 40",
-                heatNo1 = "HT-60211",
-                part2 = "Té Égal 6\"",
-                heatNo2 = "HT-77190",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-21",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-23",
-                ndtType = "RT",
-                ndtResult = "PENDING",
-                ndtReportNo = "",
-                status = "PENDING_NDT",
-                notes = "En attente tir radiographique équipe NDT de nuit"
-            ),
-            WeldJoint(
-                jointNo = "W-004",
-                lineNo = "08-CS-150-01",
-                spoolNo = "SP-02",
-                drawingNo = "ISO-PR-401",
-                welderId = "S-104",
-                welderName = "Ahmed Benali",
-                wpsNo = "WPS-CS-01",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A106 Gr.B",
-                diameterInch = 6.0,
-                thicknessMm = 7.11,
-                weldDate = "2026-09-23",
-                part1 = "Té Égal 6\"",
-                heatNo1 = "HT-77190",
-                part2 = "Bride 6\" WN 150#",
-                heatNo2 = "HT-39014",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-22",
-                visualStatus = "REJECTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-23",
-                ndtType = "RT",
-                ndtResult = "REJECTED",
-                ndtReportNo = "VT-REP-012",
-                repairCount = 1,
-                status = "REPAIR_REQUIRED",
-                notes = "Caniveau excessif en position 2h à 4h, meulage et reprise exigés"
-            ),
-            WeldJoint(
-                jointNo = "W-005",
-                lineNo = "04-SS-300-02",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-SS-202",
-                welderId = "S-201",
-                welderName = "Jean Tremblay",
-                wpsNo = "WPS-SS-02",
-                process = "GTAW",
-                weldType = "BW",
-                material = "SS 316L",
-                diameterInch = 4.0,
-                thicknessMm = 6.02,
-                weldDate = "2026-09-20",
-                part1 = "Tuyau 4\" Sch 40S",
-                heatNo1 = "SS-4819A",
-                part2 = "Coude 90° 4\" 316L",
-                heatNo2 = "SS-3301B",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-19",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-21",
-                ndtType = "PT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "PT-2026-088",
-                ndtDate = "2026-09-21",
-                status = "COMPLETED",
-                notes = "Inertage argon certifié O2 < 50ppm, ressuage ressué sans anomalie"
-            ),
-            WeldJoint(
-                jointNo = "W-006",
-                lineNo = "04-SS-300-02",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-SS-202",
-                welderId = "S-201",
-                welderName = "Jean Tremblay",
-                wpsNo = "WPS-SS-02",
-                process = "GTAW",
-                weldType = "BW",
-                material = "SS 316L",
-                diameterInch = 4.0,
-                thicknessMm = 6.02,
-                weldDate = "2026-09-21",
-                part1 = "Coude 90° 4\" 316L",
-                heatNo1 = "SS-3301B",
-                part2 = "Bride 4\" WN 300# 316L",
-                heatNo2 = "SS-5920C",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-20",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-22",
-                ndtType = "PT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "PT-2026-091",
-                ndtDate = "2026-09-22",
-                status = "COMPLETED",
-                notes = "Soudure propre, coloration dorée après brossage inox"
-            ),
-            WeldJoint(
-                jointNo = "W-007",
-                lineNo = "04-SS-300-02",
-                spoolNo = "SP-02",
-                drawingNo = "ISO-SS-202",
-                welderId = "S-201",
-                welderName = "Jean Tremblay",
-                wpsNo = "WPS-SS-02",
-                process = "GTAW",
-                weldType = "BW",
-                material = "SS 316L",
-                diameterInch = 3.0,
-                thicknessMm = 5.49,
-                weldDate = "2026-09-24",
-                part1 = "Tuyau 3\" Sch 40S",
-                heatNo1 = "SS-7102D",
-                part2 = "Réduction Conc. 4x3\"",
-                heatNo2 = "SS-8819E",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-23",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-24",
-                ndtType = "PT",
-                ndtResult = "PENDING",
-                ndtReportNo = "",
-                status = "PENDING_NDT",
-                notes = "Contrôle ressuage programmé cet après-midi"
-            ),
-            WeldJoint(
-                jointNo = "FW-008",
-                lineNo = "04-SS-300-02",
-                spoolNo = "SP-02",
-                drawingNo = "ISO-SS-202",
-                welderId = "S-201",
-                welderName = "Jean Tremblay",
-                wpsNo = "WPS-SS-03",
-                process = "GTAW",
-                weldType = "FW",
-                material = "SS 316L",
-                diameterInch = 2.0,
-                thicknessMm = 3.91,
-                weldDate = "2026-09-25",
-                part1 = "Tuyau 2\" Sch 40S",
-                heatNo1 = "SS-9104F",
-                part2 = "Bride Slip-On 2\" 300#",
-                heatNo2 = "SS-1182G",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-24",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-25",
-                ndtType = "VT ONLY",
-                ndtResult = "NOT_REQUIRED",
-                ndtReportNo = "",
-                status = "COMPLETED",
-                notes = "Soudure d'angle sur bride Slip-On conforme ASME B31.3"
-            ),
-            WeldJoint(
-                jointNo = "W-009",
-                lineNo = "12-CS-600-03",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-HP-505",
-                welderId = "S-305",
-                welderName = "Sofiane Kaci",
-                wpsNo = "WPS-CS-02",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A333 Gr.6",
-                diameterInch = 12.0,
-                thicknessMm = 17.48,
-                weldDate = "2026-09-17",
-                part1 = "Tuyau 12\" Sch 80 LTCS",
-                heatNo1 = "A333-8821",
-                part2 = "Coude 90° 12\" Sch 80",
-                heatNo2 = "A333-9114",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-16",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-18",
-                ndtType = "UT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "UT-2026-112",
-                ndtDate = "2026-09-19",
-                status = "COMPLETED",
-                notes = "Gros diamètre haute pression, contrôle ultrasons 100% sans défaut"
-            ),
-            WeldJoint(
-                jointNo = "W-010",
-                lineNo = "12-CS-600-03",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-HP-505",
-                welderId = "S-305",
-                welderName = "Sofiane Kaci",
-                wpsNo = "WPS-CS-02",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A333 Gr.6",
-                diameterInch = 12.0,
-                thicknessMm = 17.48,
-                weldDate = "2026-09-18",
-                part1 = "Coude 90° 12\" Sch 80",
-                heatNo1 = "A333-9114",
-                part2 = "Bride 12\" WN 600#",
-                heatNo2 = "A350-4402",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-17",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-19",
-                ndtType = "UT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "UT-2026-115",
-                ndtDate = "2026-09-20",
-                status = "COMPLETED",
-                notes = "Éprouvé et validé pour épreuve hydrostatique"
-            ),
-            WeldJoint(
-                jointNo = "W-011",
-                lineNo = "12-CS-600-03",
-                spoolNo = "SP-02",
-                drawingNo = "ISO-HP-505",
-                welderId = "S-101",
-                welderName = "Marc Dupont",
-                wpsNo = "WPS-CS-02",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A333 Gr.6",
-                diameterInch = 10.0,
-                thicknessMm = 15.09,
-                weldDate = "2026-09-24",
-                part1 = "Tuyau 10\" Sch 80",
-                heatNo1 = "A333-3199",
-                part2 = "Té 12x10\" Réduit",
-                heatNo2 = "A333-5582",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-23",
-                visualStatus = "PENDING",
-                visualInspector = "",
-                visualDate = "",
-                ndtType = "UT",
-                ndtResult = "PENDING",
-                status = "IN_PROGRESS",
-                notes = "Passe terminale en cours de refroidissement"
-            ),
-            WeldJoint(
-                jointNo = "W-012",
-                lineNo = "06-DP-150-04",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-DP-101",
-                welderId = "S-402",
-                welderName = "David Leroy",
-                wpsNo = "WPS-DUPLEX-01",
-                process = "GTAW",
-                weldType = "BW",
-                material = "Duplex 2205",
-                diameterInch = 6.0,
-                thicknessMm = 7.11,
-                weldDate = "2026-09-22",
-                part1 = "Tuyau 6\" Duplex 2205",
-                heatNo1 = "DPX-8831",
-                part2 = "Coude 90° 6\" Duplex",
-                heatNo2 = "DPX-9942",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-21",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-23",
-                ndtType = "RT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "RT-2026-068",
-                ndtDate = "2026-09-24",
-                status = "COMPLETED",
-                notes = "Soudure Duplex gaz de protection Ar+2%N2, température interpasse < 150°C"
-            ),
-            WeldJoint(
-                jointNo = "W-013",
-                lineNo = "06-DP-150-04",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-DP-101",
-                welderId = "S-402",
-                welderName = "David Leroy",
-                wpsNo = "WPS-DUPLEX-01",
-                process = "GTAW",
-                weldType = "BW",
-                material = "Duplex 2205",
-                diameterInch = 6.0,
-                thicknessMm = 7.11,
-                weldDate = "2026-09-23",
-                part1 = "Coude 90° 6\" Duplex",
-                heatNo1 = "DPX-9942",
-                part2 = "Bride 6\" WN Duplex",
-                heatNo2 = "DPX-1033",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-M. Robert",
-                fitupDate = "2026-09-22",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-M. Robert",
-                visualDate = "2026-09-24",
-                ndtType = "RT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "RT-2026-070",
-                ndtDate = "2026-09-25",
-                status = "COMPLETED",
-                notes = "Pénétration intégrale et ferrite mesurée entre 40% et 55%"
-            ),
-            WeldJoint(
-                jointNo = "SW-014",
-                lineNo = "02-CS-150-05",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-INST-12",
-                welderId = "S-104",
-                welderName = "Ahmed Benali",
-                wpsNo = "WPS-CS-03",
-                process = "GTAW",
-                weldType = "SW",
-                material = "A106 Gr.B",
-                diameterInch = 1.5,
-                thicknessMm = 3.68,
-                weldDate = "2026-09-25",
-                part1 = "Tuyau 1.5\" Sch 80",
-                heatNo1 = "HT-1194",
-                part2 = "Manchon SW 3000#",
-                heatNo2 = "HT-7721",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-24",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-25",
-                ndtType = "MT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "MT-2026-033",
-                ndtDate = "2026-09-25",
-                status = "COMPLETED",
-                notes = "Prise d'instrumentation Socket Weld jeu de 1.6mm respecté"
-            ),
-            WeldJoint(
-                jointNo = "SW-015",
-                lineNo = "02-CS-150-05",
-                spoolNo = "SP-01",
-                drawingNo = "ISO-INST-12",
-                welderId = "S-104",
-                welderName = "Ahmed Benali",
-                wpsNo = "WPS-CS-03",
-                process = "GTAW",
-                weldType = "SW",
-                material = "A106 Gr.B",
-                diameterInch = 1.0,
-                thicknessMm = 3.38,
-                weldDate = "2026-09-26",
-                part1 = "Tuyau 1\" Sch 80",
-                heatNo1 = "HT-8812",
-                part2 = "Vanne à boisseau SW",
-                heatNo2 = "VALV-4401",
-                fitupStatus = "ACCEPTED",
-                fitupInspector = "QC-L. Blanc",
-                fitupDate = "2026-09-25",
-                visualStatus = "ACCEPTED",
-                visualInspector = "QC-L. Blanc",
-                visualDate = "2026-09-26",
-                ndtType = "MT",
-                ndtResult = "ACCEPTED",
-                ndtReportNo = "MT-2026-034",
-                ndtDate = "2026-09-26",
-                status = "COMPLETED",
-                notes = "Soudure d'évent purgeur d'air"
-            ),
-            WeldJoint(
-                jointNo = "W-016",
-                lineNo = "08-CS-150-01",
-                spoolNo = "SP-03",
-                drawingNo = "ISO-PR-401",
-                welderId = "S-101",
-                welderName = "Marc Dupont",
-                wpsNo = "WPS-CS-01",
-                process = "GTAW+SMAW",
-                weldType = "BW",
-                material = "A106 Gr.B",
-                diameterInch = 8.0,
-                thicknessMm = 8.18,
-                weldDate = "2026-09-26",
-                part1 = "Tuyau 8\" Sch 40",
-                heatNo1 = "HT-48291",
-                part2 = "Té 8\" Égal",
-                heatNo2 = "HT-9930",
-                fitupStatus = "PENDING",
-                fitupInspector = "",
-                fitupDate = "",
-                visualStatus = "PENDING",
-                visualInspector = "",
-                visualDate = "",
-                ndtType = "RT",
-                ndtResult = "PENDING",
-                status = "IN_PROGRESS",
-                notes = "Chanfreinage terminé, calage des pointages en cours"
-            )
-        )
+        emit(ExcelParser.exportToCsv(welds))
     }
 }

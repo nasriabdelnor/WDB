@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "WeldTrack Light"
+rootProject.name = "WDB"
 
 include(":app")

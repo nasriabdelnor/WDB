@@ -31,6 +31,40 @@ object ExcelParser {
     }
 
     /**
+     * Inspects an Excel or CSV file without writing to DB, returning file metrics, detected columns,
+     * total joint count, and first 10 preview rows.
+     */
+    fun inspectAndParseStream(
+        inputStream: InputStream,
+        filenameHint: String = "Welding Data Base01.xlsx",
+        sourceDescription: String = "Fichier local"
+    ): ExcelInspectionResult {
+        val bytes = inputStream.readBytes()
+        val fileSizeFormatted = when {
+            bytes.size >= 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f Mo", bytes.size / (1024.0 * 1024.0))
+            bytes.size >= 1024 -> String.format(Locale.getDefault(), "%.1f Ko", bytes.size / 1024.0)
+            else -> "${bytes.size} octets"
+        }
+
+        val welds = parseStream(bytes.inputStream(), filenameHint)
+        val detected = if (lastDetectedColumns.isNotEmpty()) lastDetectedColumns else listOf(
+            "ISO", "SPOOL", "JOINT", "PART 1", "PART 1 HEAT NUMBER",
+            "PART 2", "PART 2 HEAT NUMBER", "WPS", "WELDER", "PROCESS", "RT", "PT", "UT"
+        )
+
+        return ExcelInspectionResult(
+            fileName = filenameHint,
+            fileSizeFormatted = fileSizeFormatted,
+            fileSizeBytes = bytes.size.toLong(),
+            detectedColumns = detected,
+            totalJointsFound = welds.size,
+            previewRows = welds.take(10),
+            parsedWelds = welds,
+            sourceDescription = sourceDescription
+        )
+    }
+
+    /**
      * Parses raw CSV or TSV bytes supporting comma, semicolon, tab, and quotes.
      */
     fun parseCsvOrTsv(bytes: ByteArray): List<WeldJoint> {
@@ -541,8 +575,31 @@ object ExcelParser {
         val part2: Int = -1,
         val heatNo1: Int = -1,
         val heatNo2: Int = -1,
-        val singleHeatNo: Int = -1
-    )
+        val singleHeatNo: Int = -1,
+        val rtResult: Int = -1,
+        val ptResult: Int = -1,
+        val utResult: Int = -1
+    ) {
+        fun getDetectedColumns(): List<String> {
+            val list = mutableListOf<String>()
+            if (lineNo != -1) list.add("ISO")
+            if (spoolNo != -1) list.add("SPOOL")
+            if (jointNo != -1) list.add("JOINT")
+            if (part1 != -1) list.add("PART 1")
+            if (heatNo1 != -1 || singleHeatNo != -1) list.add("PART 1 HEAT NUMBER")
+            if (part2 != -1) list.add("PART 2")
+            if (heatNo2 != -1 || singleHeatNo != -1) list.add("PART 2 HEAT NUMBER")
+            if (wpsNo != -1) list.add("WPS")
+            if (welderId != -1) list.add("WELDER")
+            if (process != -1) list.add("PROCESS")
+            if (rtResult != -1 || ndtType != -1) list.add("RT")
+            if (ptResult != -1) list.add("PT")
+            if (utResult != -1) list.add("UT")
+            return list
+        }
+    }
+
+    var lastDetectedColumns: List<String> = emptyList()
 
     private fun mapHeaders(headers: List<String>): HeaderIndices {
         var jointNo = -1
@@ -570,14 +627,18 @@ object ExcelParser {
         var heatNo1 = -1
         var heatNo2 = -1
         var singleHeatNo = -1
+        var rtResult = -1
+        var ptResult = -1
+        var utResult = -1
 
         // 1. First pass: High-precision matching for Joint, Line, Spool
         for ((idx, hRaw) in headers.withIndex()) {
             val h = hRaw.lowercase().trim()
 
-            // Isométrie / Ligne
+            // Isométrie / Ligne ("Isometric Dwg No.", "ISO Number")
             if (lineNo == -1) {
-                if (h.contains("iso") || h.contains("isometrique") || h.contains("isométrique") ||
+                if (h.contains("isometric dwg") || h.contains("dwg no") || h.contains("iso") ||
+                    h.contains("isometrique") || h.contains("isométrique") ||
                     h.contains("isometric") || h.contains("line no") || h.contains("ligne") ||
                     h.contains("linea") || h.contains("piping") || h.contains("n° ligne") ||
                     h.contains("no ligne") || h.contains("n° iso") || h.contains("no iso") ||
@@ -587,7 +648,7 @@ object ExcelParser {
                 }
             }
 
-            // Tronçon / Spool
+            // Tronçon / Spool ("SPOOL N°", "Spool Number")
             if (spoolNo == -1) {
                 if (h.contains("spool") || h.contains("troncon") || h.contains("tronçon") ||
                     h.contains("tronc") || h.contains("pezzo") || h.contains("pezzi") ||
@@ -604,7 +665,7 @@ object ExcelParser {
                 }
             }
 
-            // Joint No (Exact / Explicit match first)
+            // Joint No ("Joint No.", "Joint Number", "Weld No")
             if (jointNo == -1) {
                 if (h.contains("joint no") || h.contains("joint n°") || h.contains("n° joint") ||
                     h.contains("no joint") || h.contains("weld no") || h.contains("weld n°") ||
@@ -623,11 +684,16 @@ object ExcelParser {
             if (idx == lineNo || idx == spoolNo || idx == jointNo) continue
 
             when {
+                // Specific NDT Results ("Résultat RT", "RT Result", "Résultat PT", "PT Result", "Résultat UT", "UT Result")
+                rtResult == -1 && (h.contains("rt result") || h.contains("résultat rt") || h.contains("resultat rt") || h.contains("rt res") || h == "rt" || h.contains("radiograph")) -> rtResult = idx
+                ptResult == -1 && (h.contains("pt result") || h.contains("résultat pt") || h.contains("resultat pt") || h.contains("pt res") || h == "pt" || h.contains("penetrant") || h.contains("ressuage")) -> ptResult = idx
+                utResult == -1 && (h.contains("ut result") || h.contains("résultat ut") || h.contains("resultat ut") || h.contains("ut res") || h == "ut" || h.contains("ultrason")) -> utResult = idx
+
                 // Secondary check for Joint if not found
                 jointNo == -1 && (h.contains("soudure") || h.contains("joint") || h.contains("weld") || h == "no" || h == "n°") -> jointNo = idx
 
-                // Parts / Composants (Partie 1 & Partie 2)
-                part1 == -1 && (h.contains("part 1") || h.contains("partie 1") || h.contains("partie1") || h.contains("part_1") ||
+                // Parts / Composants ("PART 01", "PART 02")
+                part1 == -1 && (h.contains("part 01") || h.contains("part 1") || h.contains("partie 1") || h.contains("partie1") || h.contains("part_1") ||
                     h.contains("element 1") || h.contains("élément 1") || h.contains("element1") || h.contains("élément1") ||
                     h.contains("item 1") || h.contains("item1") || h.contains("comp 1") || h.contains("comp1") ||
                     h.contains("composant 1") || h.contains("composant1") || h.contains("piece 1") || h.contains("pièce 1") ||
@@ -636,7 +702,7 @@ object ExcelParser {
                     h == "p1" || h == "elt 1" || h.contains("type 1") || h.contains("part(1)")
                 ) -> part1 = idx
 
-                part2 == -1 && (h.contains("part 2") || h.contains("partie 2") || h.contains("partie2") || h.contains("part_2") ||
+                part2 == -1 && (h.contains("part 02") || h.contains("part 2") || h.contains("partie 2") || h.contains("partie2") || h.contains("part_2") ||
                     h.contains("element 2") || h.contains("élément 2") || h.contains("element2") || h.contains("élément2") ||
                     h.contains("item 2") || h.contains("item2") || h.contains("comp 2") || h.contains("comp2") ||
                     h.contains("composant 2") || h.contains("composant2") || h.contains("piece 2") || h.contains("pièce 2") ||
@@ -645,8 +711,8 @@ object ExcelParser {
                     h == "p2" || h == "elt 2" || h.contains("type 2") || h.contains("part(2)")
                 ) -> part2 = idx
 
-                // Heat Numbers / N° de Coulée
-                heatNo1 == -1 && (h.contains("heat 1") || h.contains("heat no 1") || h.contains("heat no. 1") || h.contains("heat n° 1") ||
+                // Heat Numbers / N° de Coulée ("HEAT Number PART 01", "HEAT Number PART 02")
+                heatNo1 == -1 && (h.contains("heat number part 01") || h.contains("heat number part 1") || h.contains("heat 1") || h.contains("heat no 1") || h.contains("heat no. 1") || h.contains("heat n° 1") ||
                     h.contains("heat_1") || h.contains("heat1") || h.contains("coulee 1") || h.contains("coulée 1") ||
                     h.contains("coulee1") || h.contains("coulée1") || h.contains("n° coulee 1") || h.contains("n° coulée 1") ||
                     h.contains("no coulee 1") || h.contains("no coulée 1") || h.contains("cce 1") || h.contains("cce1") ||
@@ -655,7 +721,7 @@ object ExcelParser {
                     h.contains("cast 1") || h.contains("charge 1") || h.contains("lot 1")
                 ) -> heatNo1 = idx
 
-                heatNo2 == -1 && (h.contains("heat 2") || h.contains("heat no 2") || h.contains("heat no. 2") || h.contains("heat n° 2") ||
+                heatNo2 == -1 && (h.contains("heat number part 02") || h.contains("heat number part 2") || h.contains("heat 2") || h.contains("heat no 2") || h.contains("heat no. 2") || h.contains("heat n° 2") ||
                     h.contains("heat_2") || h.contains("heat2") || h.contains("coulee 2") || h.contains("coulée 2") ||
                     h.contains("coulee2") || h.contains("coulée2") || h.contains("n° coulee 2") || h.contains("n° coulée 2") ||
                     h.contains("no coulee 2") || h.contains("no coulée 2") || h.contains("cce 2") || h.contains("cce2") ||
@@ -672,14 +738,14 @@ object ExcelParser {
 
                 drawingNo == -1 && (h.contains("drawing") || h.contains("plan") || h.contains("dwg") || h.contains("disegno")) -> drawingNo = idx
                 welderName == -1 && (h.contains("nom") || h.contains("welder name") || h.contains("nom soudeur") || h.contains("nome")) -> welderName = idx
-                welderId == -1 && (h.contains("welder") || h.contains("soudeur") || h.contains("saldatore") || h.contains("stamp") || h.contains("poinçon") || h.contains("poincon") || h.contains("matricule") || h == "w" || h == "op") -> welderId = idx
-                wpsNo == -1 && (h.contains("wps") || h.contains("dmos") || h.contains("qmos") || h.contains("procedure") || h.contains("pqr")) -> wpsNo = idx
+                welderId == -1 && (h.contains("welded by") || h.contains("welder") || h.contains("soudeur") || h.contains("saldatore") || h.contains("stamp") || h.contains("poinçon") || h.contains("poincon") || h.contains("matricule") || h == "w" || h == "op") -> welderId = idx
+                wpsNo == -1 && (h.contains("wps no") || h.contains("wps") || h.contains("dmos") || h.contains("qmos") || h.contains("procedure") || h.contains("pqr")) -> wpsNo = idx
                 process == -1 && (h.contains("process") || h.contains("procédé") || h.contains("procede") || h.contains("proc")) -> process = idx
-                weldType == -1 && (h.contains("type") || h.contains("tipo") || h.contains("bw/sw") || h.contains("joint type")) -> weldType = idx
+                weldType == -1 && (h.contains("weld type") || h.contains("type") || h.contains("tipo") || h.contains("bw/sw") || h.contains("joint type")) -> weldType = idx
                 material == -1 && (h.contains("material") || h.contains("matériau") || h.contains("materiau") || h.contains("materiale") || h.contains("nuance") || h.contains("metal") || h.contains("grade")) -> material = idx
                 diameter == -1 && (h.contains("dia") || h.contains("pouce") || h.contains("inch") || h.contains("dn") || h.contains("size") || h.contains("nd") || h == "ø") -> diameter = idx
                 thickness == -1 && (h.contains("thick") || h.contains("epaisseur") || h.contains("épaisseur") || h.contains("spessore") || h.contains("ép") || h.contains("ep") || h.contains("sched") || h.contains("wt")) -> thickness = idx
-                weldDate == -1 && (h.contains("date") || h.contains("data") && !h.contains("fitup") && !h.contains("visuel") && !h.contains("ndt")) -> weldDate = idx
+                weldDate == -1 && (h.contains("welding date") || h.contains("weld date") || (h.contains("date") || h.contains("data")) && !h.contains("fitup") && !h.contains("visuel") && !h.contains("ndt")) -> weldDate = idx
                 fitup == -1 && (h.contains("fitup") || h.contains("fit-up") || h.contains("pointage") || h.contains("assemblage") || h.contains("accoppiamento")) -> fitup = idx
                 visual == -1 && (h.contains("visuel") || h.contains("vt") || h.contains("visual") || h.contains("visivo")) -> visual = idx
                 ndtReport == -1 && (h.contains("report") || h.contains("rapport") || h.contains("pv") || h.contains("doc")) -> ndtReport = idx
@@ -693,12 +759,15 @@ object ExcelParser {
         if (jointNo == -1 && headers.isNotEmpty()) jointNo = 0
         if (lineNo == -1 && headers.size > 1) lineNo = 1
 
-        return HeaderIndices(
+        val res = HeaderIndices(
             jointNo, lineNo, spoolNo, drawingNo, welderId, welderName,
             wpsNo, process, weldType, material, diameter, thickness,
             weldDate, fitup, visual, ndtType, ndtResult, ndtReport, status, notes,
-            part1, part2, heatNo1, heatNo2, singleHeatNo
+            part1, part2, heatNo1, heatNo2, singleHeatNo,
+            rtResult, ptResult, utResult
         )
+        lastDetectedColumns = res.getDetectedColumns()
+        return res
     }
 
     private fun buildWeldFromRow(
@@ -802,36 +871,37 @@ object ExcelParser {
             }
         }
 
+        val rt = if (h.rtResult != -1) get(h.rtResult, "N/A") else if (ndtType == "RT") ndtResult else "N/A"
+        val pt = if (h.ptResult != -1) get(h.ptResult, "N/A") else if (ndtType == "PT") ndtResult else "N/A"
+        val ut = if (h.utResult != -1) get(h.utResult, "N/A") else if (ndtType == "UT") ndtResult else "N/A"
+
         return WeldJoint(
             id = 0,
-            jointNo = effectiveJoint,
-            lineNo = effectiveLine,
-            spoolNo = effectiveSpool,
-            drawingNo = drawingNo,
-            welderId = welderId,
-            welderName = welderName,
-            wpsNo = wpsNo,
-            process = process,
+            spoolId = 0,
+            isoId = 0,
+            isoNumber = effectiveLine,
+            spoolNumber = effectiveSpool,
+            jointNumber = effectiveJoint,
+            part1Description = part1,
+            part1Material = material,
+            part1HeatNumber = heatNo1,
+            part2Description = part2,
+            part2Material = material,
+            part2HeatNumber = heatNo2,
             weldType = weldType,
-            material = material,
+            process = process,
+            wps = wpsNo,
+            welder = welderId,
+            date = weldDate,
             diameterInch = diameter,
             thicknessMm = thickness,
-            weldDate = weldDate,
-            fitupStatus = fitupStatus,
-            fitupInspector = "QC Inspector",
-            fitupDate = weldDate,
-            visualStatus = visualStatus,
-            visualInspector = "QC Inspector",
-            visualDate = weldDate,
-            ndtType = ndtType,
-            ndtResult = ndtResult,
+            visual = visualStatus,
+            rt = rt,
+            pt = pt,
+            ut = ut,
+            drawingNo = drawingNo,
+            welderName = welderName,
             ndtReportNo = ndtReportNo,
-            ndtDate = weldDate,
-            repairCount = if (status == "REPAIR_REQUIRED") 1 else 0,
-            part1 = part1,
-            part2 = part2,
-            heatNo1 = heatNo1,
-            heatNo2 = heatNo2,
             status = status,
             notes = notes,
             updatedAt = System.currentTimeMillis()

@@ -1,6 +1,6 @@
 {
-  "name": "WeldTrack Light",
-  "description": "WDB Light v2.0 - Recherche isométrie, filtrage des soudures et détection des doublons WDB",
+  "name": "WDB",
+  "description": "WDB - Welding Data Base - Industrial welding traceability system",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

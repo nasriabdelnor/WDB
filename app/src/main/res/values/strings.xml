@@ -1,9 +1,10 @@
 <resources>
-    <string name="app_name">WeldTrack Light</string>
-    <string name="tab_dashboard">Tableau de bord</string>
-    <string name="tab_welds">Base Soudures</string>
-    <string name="tab_sync">Synchro Google &amp; Excel</string>
-    <string name="tab_reports">Statistiques</string>
+    <string name="app_name">WDB</string>
+    <string name="app_full_name">Welding Data Base</string>
+    <string name="tab_home">Accueil WDB</string>
+    <string name="tab_iso_selection">Sélection ISO</string>
+    <string name="tab_search">Recherche</string>
+    <string name="tab_quality_control">Contrôle Qualité</string>
 
     <string name="kpi_total_welds">Total Soudures</string>
     <string name="kpi_approved">Conformes (VT+CND)</string>

@@ -132,4 +132,26 @@ class ExcelParserTest {
         assertEquals("Bride WN 4\"", welds[1].part2)
         assertEquals("H-77103", welds[1].heatNo2)
     }
+
+    @Test
+    fun testGoogleSheetColumnMapping() {
+        val csv = """
+            Isometric Dwg No.,SPOOL N°,Joint No.,PART 01,HEAT Number PART 01,PART 02,HEAT Number PART 02,WELD TYPE,PROCESS,WPS No,WELDED BY,WELDING Date,RT Result,PT Result,UT Result
+            ISO-401,SP-01,J-01,Pipe 6",HT-A101,Flange 6",HT-B202,BW,GTAW+SMAW,WPS-01,W-01,2026-03-15,Accepted,Accepted,Accepted
+        """.trimIndent()
+
+        val welds = ExcelParser.parseCsvOrTsv(csv.toByteArray(Charsets.UTF_8))
+        assertEquals(1, welds.size)
+        assertEquals("ISO-401", welds[0].isoNumber)
+        assertEquals("SP-01", welds[0].spoolNumber)
+        assertEquals("J-01", welds[0].jointNumber)
+        assertEquals("HT-A101", welds[0].part1HeatNumber)
+        assertEquals("HT-B202", welds[0].part2HeatNumber)
+        assertEquals("GTAW+SMAW", welds[0].process)
+        assertEquals("WPS-01", welds[0].wps)
+        assertEquals("W-01", welds[0].welder)
+        assertEquals("Accepted", welds[0].rt)
+        assertEquals("Accepted", welds[0].pt)
+        assertEquals("Accepted", welds[0].ut)
+    }
 }
