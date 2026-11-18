@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -107,47 +108,72 @@ interface WeldJointDao {
     ): Flow<List<WeldJoint>>
 
     // --- Duplicate Detection (Quality Control) ---
+    // Clé = UPPER(TRIM(iso)) + UPPER(TRIM(spool)) + UPPER(TRIM(joint)), joints sans numéro exclus.
+    // Doit rester alignée avec DuplicateResolver.keyOf().
 
     @Query("""
-        SELECT * FROM welds
-        WHERE (isoNumber || '___' || spoolNumber || '___' || jointNumber) IN (
-            SELECT (isoNumber || '___' || spoolNumber || '___' || jointNumber)
+        SELECT w.* FROM welds w
+        INNER JOIN (
+            SELECT UPPER(TRIM(isoNumber)) AS k_iso,
+                   UPPER(TRIM(spoolNumber)) AS k_spool,
+                   UPPER(TRIM(jointNumber)) AS k_joint
             FROM welds
-            GROUP BY isoNumber, spoolNumber, jointNumber
+            WHERE TRIM(jointNumber) != ''
+            GROUP BY k_iso, k_spool, k_joint
             HAVING COUNT(*) > 1
-        )
-        ORDER BY isoNumber ASC, spoolNumber ASC, jointNumber ASC, id ASC
+        ) d ON UPPER(TRIM(w.isoNumber)) = d.k_iso
+           AND UPPER(TRIM(w.spoolNumber)) = d.k_spool
+           AND UPPER(TRIM(w.jointNumber)) = d.k_joint
+        ORDER BY d.k_iso ASC, d.k_spool ASC, d.k_joint ASC, w.id ASC
     """)
     fun getDuplicateWelds(): Flow<List<WeldJoint>>
 
     @Query("""
-        SELECT * FROM welds
-        WHERE (isoNumber || '___' || spoolNumber || '___' || jointNumber) IN (
-            SELECT (isoNumber || '___' || spoolNumber || '___' || jointNumber)
+        SELECT w.* FROM welds w
+        INNER JOIN (
+            SELECT UPPER(TRIM(isoNumber)) AS k_iso,
+                   UPPER(TRIM(spoolNumber)) AS k_spool,
+                   UPPER(TRIM(jointNumber)) AS k_joint
             FROM welds
-            GROUP BY isoNumber, spoolNumber, jointNumber
+            WHERE TRIM(jointNumber) != ''
+            GROUP BY k_iso, k_spool, k_joint
             HAVING COUNT(*) > 1
-        )
-        ORDER BY isoNumber ASC, spoolNumber ASC, jointNumber ASC, id ASC
+        ) d ON UPPER(TRIM(w.isoNumber)) = d.k_iso
+           AND UPPER(TRIM(w.spoolNumber)) = d.k_spool
+           AND UPPER(TRIM(w.jointNumber)) = d.k_joint
+        ORDER BY d.k_iso ASC, d.k_spool ASC, d.k_joint ASC, w.id ASC
     """)
     suspend fun getDuplicateWeldsSnapshot(): List<WeldJoint>
 
+    /** Nombre de fiches en trop (une paire compte 1, un triplet compte 2). */
     @Query("""
-        SELECT COUNT(*) FROM welds
-        WHERE (isoNumber || '___' || spoolNumber || '___' || jointNumber) IN (
-            SELECT (isoNumber || '___' || spoolNumber || '___' || jointNumber)
+        SELECT COALESCE(SUM(c - 1), 0) FROM (
+            SELECT COUNT(*) AS c
             FROM welds
-            GROUP BY isoNumber, spoolNumber, jointNumber
+            WHERE TRIM(jointNumber) != ''
+            GROUP BY UPPER(TRIM(isoNumber)), UPPER(TRIM(spoolNumber)), UPPER(TRIM(jointNumber))
             HAVING COUNT(*) > 1
         )
     """)
     fun getDuplicateCount(): Flow<Int>
 
+    @Query("DELETE FROM welds WHERE id IN (:ids)")
+    suspend fun deleteWeldsByIdsChunk(ids: List<Long>): Int
+
+    /** Suppression atomique, découpée pour rester sous la limite de 999 variables SQLite. */
+    @Transaction
+    suspend fun deleteWeldsByIds(ids: List<Long>): Int {
+        var deleted = 0
+        for (chunk in ids.chunked(500)) deleted += deleteWeldsByIdsChunk(chunk)
+        return deleted
+    }
+
     @Query("""
         SELECT * FROM welds 
-        WHERE isoNumber = :isoNumber 
-          AND spoolNumber = :spoolNumber 
-          AND jointNumber = :jointNumber 
+        WHERE UPPER(TRIM(isoNumber)) = UPPER(TRIM(:isoNumber))
+          AND UPPER(TRIM(spoolNumber)) = UPPER(TRIM(:spoolNumber))
+          AND UPPER(TRIM(jointNumber)) = UPPER(TRIM(:jointNumber))
+          AND TRIM(jointNumber) != ''
           AND id != :excludeId
     """)
     suspend fun findDuplicates(

@@ -83,6 +83,10 @@ class WeldRepository(
         weldJointDao.deleteWeld(weld)
     }
 
+    suspend fun deleteWeldsByIds(ids: List<Long>): Int = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) 0 else weldJointDao.deleteWeldsByIds(ids)
+    }
+
     suspend fun deleteWeldById(id: Long) = withContext(Dispatchers.IO) {
         weldJointDao.deleteWeldById(id)
     }

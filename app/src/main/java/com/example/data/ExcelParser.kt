@@ -11,6 +11,9 @@ import java.util.zip.ZipInputStream
 
 object ExcelParser {
 
+    /** Préfixe des n° de joint générés pour les lignes Excel sans n° de joint. */
+    const val AUTO_JOINT_PREFIX = "SANS-NUM-"
+
     /**
      * Parses an input stream that could be XLSX, CSV, or TSV.
      * Fully compatible with industrial WDB files (TECNOGRAF, SARPI-DZ, Sonatrach, Saipem, WCP).
@@ -441,9 +444,12 @@ object ExcelParser {
             }
 
             // Effective Joint No
+            // Préfixe distinct de la numérotation terrain ("W-1", "W-01"…) : un n° généré
+            // ne doit jamais coïncider avec un vrai joint, sinon le Contrôle Qualité y voit
+            // un doublon et le nettoyage supprime une soudure réelle.
             val effectiveJoint = when {
                 rawJoint.isNotBlank() -> rawJoint
-                else -> "W-${welds.size + 1}"
+                else -> "$AUTO_JOINT_PREFIX${welds.size + 1}"
             }
 
             val weld = buildWeldFromRow(
