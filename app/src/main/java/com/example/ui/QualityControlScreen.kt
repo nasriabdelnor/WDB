@@ -87,7 +87,7 @@ fun QualityControlScreen(
             },
             text = {
                 Text(
-                    text = "L'application va conserver la 1ère occurrence valide de chaque joint et supprimer les doublons redondants.\n\nVoulez-vous continuer ?",
+                    text = "Pour chaque joint, la fiche la plus avancée (CND, statut, champs renseignés) est conservée et les fiches redondantes sont supprimées.\n\nLes groupes en conflit (résultats ou données contradictoires) ne sont pas touchés : ils doivent être vérifiés manuellement.\n\nVoulez-vous continuer ?",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -177,6 +177,11 @@ fun QualityControlScreen(
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
+                    Text(
+                        text = "$totalWelds soudure(s) contrôlée(s) dans la base",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 11.sp
+                    )
 
                     Spacer(modifier = Modifier.height(14.dp))
 
@@ -201,7 +206,7 @@ fun QualityControlScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (duplicateCount > 0) "$duplicateCount doublon(s) détecté(s)" else "0 doublon • Intégrité 100%",
+                                    text = if (duplicateCount > 0) "$duplicateCount fiche(s) en double" else "0 doublon • Intégrité 100%",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (duplicateCount > 0) Color(0xFFFCA5A5) else Color(0xFF86EFAC)
@@ -209,7 +214,7 @@ fun QualityControlScreen(
                             }
                         }
 
-                        if (duplicateCount > 0) {
+                        if (duplicateGroups.any { it.conflicts.isEmpty() }) {
                             Button(
                                 onClick = { showCleanConfirmDialog = true },
                                 colors = ButtonDefaults.buttonColors(containerColor = RejectRed),
@@ -268,7 +273,7 @@ fun QualityControlScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Tous les joints de soudure de la base sont uniques (ISO + Spool + Joint No).",
+                            text = "Tous les joints de soudure de la base sont uniques (ISO + Spool + Joint No, sans tenir compte des majuscules ni des espaces).",
                             color = Color(0xFF94A3B8),
                             fontSize = 12.sp,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -372,6 +377,23 @@ private fun DuplicateGroupCard(
             HorizontalDivider(color = Color(0xFF334155), thickness = 0.5.dp)
             Spacer(modifier = Modifier.height(8.dp))
 
+            if (group.conflicts.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xFFF59E0B).copy(alpha = 0.15f),
+                    modifier = Modifier.fillMaxWidth().testTag("duplicate_conflict_${group.key}")
+                ) {
+                    Text(
+                        text = "Conflit à vérifier — non nettoyé automatiquement : ${group.conflicts.joinToString(", ")}",
+                        color = Color(0xFFFCD34D),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             // Sub-joints
             group.welds.forEachIndexed { index, weld ->
                 Row(
@@ -383,10 +405,14 @@ private fun DuplicateGroupCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val isKeeper = weld.id == group.keeperId
                     Text(
-                        text = "Occurrence #${index + 1} (ID #${weld.id}) • Soudeur: ${weld.welder.ifBlank { "N/A" }}",
-                        color = Color(0xFFCBD5E1),
-                        fontSize = 12.sp
+                        text = "Occurrence #${index + 1} (ID #${weld.id}) • Soudeur: ${weld.welder.ifBlank { "N/A" }}" +
+                            if (isKeeper) " • Conservée" else "",
+                        color = if (isKeeper) Color(0xFF86EFAC) else Color(0xFFCBD5E1),
+                        fontSize = 12.sp,
+                        fontWeight = if (isKeeper) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f)
                     )
                     Text(
                         text = "Voir fiche ▶",

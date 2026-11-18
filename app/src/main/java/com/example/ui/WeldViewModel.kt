@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.DuplicateResolver
 import com.example.data.DuplicateWeldGroup
 import com.example.data.ExcelInspectionResult
 import com.example.data.Isometric
@@ -311,45 +312,29 @@ class WeldViewModel(
             initialValue = emptyList()
         )
 
-    val duplicateGroups: StateFlow<List<DuplicateWeldGroup>> = duplicateWelds.map { duplicates ->
-        duplicates.groupBy { w ->
-            val l = w.isoNumber.trim().uppercase()
-            val s = w.spoolNumber.trim().uppercase()
-            val j = w.jointNumber.trim().uppercase()
-            "$l|$s|$j"
-        }.map { (key, group) ->
-            val first = group.first()
-            DuplicateWeldGroup(
-                key = key,
-                lineNo = first.isoNumber,
-                spoolNo = first.spoolNumber,
-                jointNo = first.jointNumber,
-                count = group.size,
-                welds = group
-            )
-        }
-    }.stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptyList())
+    val duplicateGroups: StateFlow<List<DuplicateWeldGroup>> = duplicateWelds
+        .map { DuplicateResolver.group(it) }
+        .flowOn(Dispatchers.Default)
+        .stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = emptyList())
 
+    /** Nombre de fiches en trop (une paire compte 1). */
     val duplicateCount: StateFlow<Int> = repository.duplicateCount
         .stateIn(scope = viewModelScope, started = SharingStarted.WhileSubscribed(5000), initialValue = 0)
 
     fun removeDuplicateWelds() {
         viewModelScope.launch {
-            val groups = duplicateGroups.value
-            val toDelete = mutableListOf<WeldJoint>()
-            for (g in groups) {
-                if (g.welds.size > 1) {
-                    toDelete.addAll(g.welds.drop(1))
-                }
-            }
-            if (toDelete.isNotEmpty()) {
-                for (w in toDelete) {
-                    repository.deleteWeld(w)
-                }
-                _syncState.value = SyncUiState.Success("${toDelete.size} doublon(s) nettoyé(s) avec succès dans la base WDB.", toDelete.size)
-            } else {
-                _syncState.value = SyncUiState.Success("Aucun doublon à supprimer dans la base.", 0)
-            }
+            // Relecture fraîche de la base : ne pas se fier à un état d'écran potentiellement périmé.
+            val groups = DuplicateResolver.group(repository.getDuplicateWeldsSnapshot())
+            val ids = DuplicateResolver.idsToDelete(groups)
+            val conflictGroups = groups.count { it.conflicts.isNotEmpty() }
+            val deleted = repository.deleteWeldsByIds(ids)
+            val conflictMsg = if (conflictGroups > 0)
+                " $conflictGroups groupe(s) en conflit conservé(s) : à vérifier manuellement." else ""
+            _syncState.value = SyncUiState.Success(
+                if (deleted > 0) "$deleted doublon(s) nettoyé(s) dans la base WDB.$conflictMsg"
+                else "Aucun doublon supprimable automatiquement.$conflictMsg",
+                deleted
+            )
         }
     }
 

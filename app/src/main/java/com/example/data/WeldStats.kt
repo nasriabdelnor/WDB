@@ -88,7 +88,11 @@ data class DuplicateWeldGroup(
     val spoolNo: String,
     val jointNo: String,
     val count: Int,
-    val welds: List<WeldJoint>
+    val welds: List<WeldJoint>,
+    /** Fiche conservée lors du nettoyage. */
+    val keeperId: Long = welds.firstOrNull()?.id ?: 0L,
+    /** Champs contradictoires : si non vide, le groupe doit être arbitré manuellement. */
+    val conflicts: List<String> = emptyList()
 )
 
 

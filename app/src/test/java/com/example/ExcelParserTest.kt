@@ -154,4 +154,22 @@ class ExcelParserTest {
         assertEquals("Accepted", welds[0].pt)
         assertEquals("Accepted", welds[0].ut)
     }
+
+    @Test
+    fun `ligne sans numero de joint ne cree pas de faux doublon`() {
+        // E9 : avant correction, la 3e ligne recevait "W-3" et entrait en doublon avec le vrai W-3.
+        val csv = """
+            N° ISO;Rep. Spool;N° Joint;Soudeur
+            ISO-700;SP-01;W-1;S-10
+            ISO-700;SP-01;W-2;S-10
+            ISO-700;SP-01;;S-11
+            ISO-700;SP-01;W-3;S-12
+        """.trimIndent()
+
+        val welds = ExcelParser.parseCsvOrTsv(csv.toByteArray(Charsets.UTF_8))
+        assertEquals(4, welds.size)
+        assertEquals("${ExcelParser.AUTO_JOINT_PREFIX}3", welds[2].jointNo)
+        assertEquals(4, welds.map { it.jointNo.uppercase() }.distinct().size)
+        assertTrue(com.example.data.DuplicateResolver.group(welds).isEmpty())
+    }
 }
